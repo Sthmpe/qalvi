@@ -39,9 +39,9 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext):
     session = AgentSession(
         vad=silero.VAD.load(),
-        stt=groq.STT(),
-        llm=groq.LLM(),
-        tts=groq.TTS(),
+        stt=groq.STT(model="whisper-large-v3-turbo"),
+        llm=groq.LLM(model="openai/gpt-oss-120b"),
+        tts=groq.TTS(model="canopylabs/orpheus-v1-english", voice="autumn"),
     )
 
     agent = Agent(instructions=INSTRUCTIONS)
