@@ -5,6 +5,7 @@ import VoiceOrb from "./VoiceOrb";
 import Transcript from "./Transcript";
 import InterviewControls from "./InterviewControls";
 import VisualStage from "./VisualStage";
+import { useLiveKitSession } from "./useLiveKitSession";
 import {
   AI_CONCEPT_FOLLOW_UP,
   AI_CONCEPT_INTRO,
@@ -25,25 +26,41 @@ function nextId() {
 }
 
 /**
- * Orchestrates the mocked Milestone 1 interview experience.
- * All state is local — no network, no LiveKit, no Groq, no Supabase.
- * This will be replaced by the real interview engine in later milestones.
+ * Which backend is actually driving the current conversation.
+ * - "live": real LiveKit + Groq voice pipeline (Milestone 2 proof)
+ * - "mock": Milestone 1's local, timer-based scripted conversation
+ *
+ * `mode` (voice/text) is only the participant's input-widget preference.
+ * Choosing "voice" at Start Interview drives the real engine; "text"
+ * stays mocked for now, per Milestone 2 scope (hybrid state-merging is
+ * future work — see docs/ARCHITECTURE.md "Voice Architecture").
  */
+type Engine = "live" | "mock" | null;
+
 export default function InterviewRoom() {
   const [started, setStarted] = useState(false);
-  const [status, setStatus] = useState<InterviewStatus>("idle");
+  const [engine, setEngine] = useState<Engine>(null);
   const [mode, setMode] = useState<InputMode>("voice");
-  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+
+  // --- Mock engine state (Milestone 1, unchanged) ---
+  const [mockStatus, setMockStatus] = useState<InterviewStatus>("idle");
+  const [mockMessages, setMockMessages] = useState<TranscriptMessage[]>([]);
   const [turnCount, setTurnCount] = useState(0);
   const [visualVisible, setVisualVisible] = useState(false);
   const [selectedConceptId, setSelectedConceptId] = useState<string | null>(null);
 
   const timers = useRef<number[]>([]);
 
+  // --- Live engine state (Milestone 2) ---
+  const liveKit = useLiveKitSession();
+
   useEffect(() => {
+    const activeTimers = timers.current;
     return () => {
-      timers.current.forEach((id) => window.clearTimeout(id));
+      activeTimers.forEach((id) => window.clearTimeout(id));
+      liveKit.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function schedule(fn: () => void, delay: number) {
@@ -52,30 +69,44 @@ export default function InterviewRoom() {
   }
 
   function say(speaker: TranscriptMessage["speaker"], text: string) {
-    setMessages((prev) => [...prev, { id: nextId(), speaker, text }]);
+    setMockMessages((prev) => [...prev, { id: nextId(), speaker, text }]);
   }
 
   function aiRespond(text: string, options?: { thenShowVisual?: boolean }) {
-    setStatus("thinking");
+    setMockStatus("thinking");
     schedule(() => {
-      setStatus("speaking");
+      setMockStatus("speaking");
       say("ai", text);
       schedule(() => {
         if (options?.thenShowVisual) {
           setVisualVisible(true);
         }
-        setStatus("listening");
+        setMockStatus("listening");
       }, SPEAK_DELAY);
     }, THINK_DELAY);
   }
 
-  function handleStart() {
-    setStarted(true);
+  function startMockConversation() {
+    setEngine("mock");
+    setMockMessages([]);
+    setTurnCount(0);
+    setVisualVisible(false);
+    setSelectedConceptId(null);
     aiRespond(AI_GREETING);
   }
 
+  function handleStart() {
+    setStarted(true);
+    if (mode === "voice") {
+      setEngine("live");
+      void liveKit.start();
+    } else {
+      startMockConversation();
+    }
+  }
+
   function handleParticipantTurn(text: string) {
-    if (status !== "listening") return;
+    if (mockStatus !== "listening") return;
     say("participant", text);
 
     const turn = turnCount + 1;
@@ -91,7 +122,10 @@ export default function InterviewRoom() {
   }
 
   function handleMicTap() {
-    if (status !== "listening") return;
+    if (engine === "live") {
+      liveKit.toggleMic();
+      return;
+    }
     const reply =
       MOCK_PARTICIPANT_REPLIES[turnCount] ??
       "That's roughly how it plays out for us most of the time.";
@@ -103,16 +137,35 @@ export default function InterviewRoom() {
   }
 
   function handleToggleMode() {
-    setMode((prev) => (prev === "voice" ? "text" : "voice"));
+    if (!started) {
+      setMode((prev) => (prev === "voice" ? "text" : "voice"));
+      return;
+    }
+
+    if (mode === "voice") {
+      // Real voice session (or a failed attempt at one) → fall back to the
+      // mocked text conversation. Merging live voice + text into one
+      // engine is out of scope for this milestone.
+      liveKit.stop();
+      setMode("text");
+      startMockConversation();
+    } else {
+      // Mocked conversation already running — just swap the input widget,
+      // same behaviour as Milestone 1.
+      setMode("voice");
+    }
   }
 
   function handleSelectConcept(id: string) {
-    if (status !== "listening" || selectedConceptId) return;
+    if (mockStatus !== "listening" || selectedConceptId) return;
     setSelectedConceptId(id);
     const option = CONCEPT_OPTIONS.find((c) => c.id === id);
     say("participant", `I'd go with ${option?.label ?? "that one"}.`);
     aiRespond(AI_CONCEPT_FOLLOW_UP);
   }
+
+  const status = engine === "live" ? liveKit.status : mockStatus;
+  const messages = engine === "live" ? liveKit.messages : mockMessages;
 
   return (
     <div className="flex min-h-dvh flex-col bg-[var(--background)]">
@@ -133,7 +186,20 @@ export default function InterviewRoom() {
             <Transcript messages={messages} />
           </div>
 
-          {visualVisible && (
+          {engine === "live" && liveKit.error && (
+            <div className="animate-fade-in-up rounded-2xl border border-[var(--border)] bg-[var(--surface)]/60 px-4 py-3 text-center text-sm text-[var(--muted)]">
+              <p className="mb-2">{liveKit.error}</p>
+              <button
+                type="button"
+                onClick={handleToggleMode}
+                className="text-xs font-medium text-[var(--accent)] underline-offset-4 hover:underline"
+              >
+                Continue in text mode instead
+              </button>
+            </div>
+          )}
+
+          {engine === "mock" && visualVisible && (
             <VisualStage
               options={CONCEPT_OPTIONS}
               selectedId={selectedConceptId}

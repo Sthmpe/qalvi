@@ -6,6 +6,7 @@ interface VoiceOrbProps {
 
 const STATUS_LABEL: Record<InterviewStatus, string> = {
   idle: "Ready when you are",
+  connecting: "Connecting",
   listening: "Listening",
   thinking: "Thinking",
   speaking: "Speaking",
@@ -40,8 +41,10 @@ export default function VoiceOrb({ status }: VoiceOrbProps) {
         {/* Core orb */}
         <div
           className={`relative h-24 w-24 rounded-full bg-[radial-gradient(circle_at_35%_30%,var(--accent-soft),var(--accent)_70%)] shadow-[0_0_40px_-8px_var(--accent)] transition-transform duration-700 ease-out sm:h-28 sm:w-28 ${
-            status === "thinking" ? "animate-orb-breathe" : ""
-          } ${status === "speaking" ? "scale-105" : "scale-100"}`}
+            status === "thinking" || status === "connecting" ? "animate-orb-breathe" : ""
+          } ${status === "speaking" ? "scale-105" : "scale-100"} ${
+            status === "connecting" ? "opacity-70" : "opacity-100"
+          }`}
         >
           <span
             aria-hidden

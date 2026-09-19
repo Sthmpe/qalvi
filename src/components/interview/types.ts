@@ -1,4 +1,4 @@
-export type InterviewStatus = "idle" | "listening" | "thinking" | "speaking";
+export type InterviewStatus = "idle" | "connecting" | "listening" | "thinking" | "speaking";
 
 export type InputMode = "voice" | "text";
 

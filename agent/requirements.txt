@@ -1,0 +1,2 @@
+livekit-agents[groq,silero]~=1.5
+python-dotenv
