@@ -189,3 +189,81 @@ Do NOT build yet:
 - marketplace of research templates
 
 These may come later.
+
+## UI / UX Direction
+
+Qalvi must feel premium, modern, calm, intelligent and highly polished.
+
+The interface should NOT look like:
+- a generic admin dashboard
+- a survey form
+- a basic ChatGPT clone
+- an enterprise CRM
+- a developer tool
+
+The participant interview experience is the most important surface.
+
+It should feel like entering a focused AI research session.
+
+### Visual direction
+
+Aim for:
+- minimal layouts
+- generous spacing
+- excellent typography
+- subtle depth
+- smooth motion
+- rounded but not overly playful components
+- elegant cards
+- sophisticated micro-interactions
+- strong visual hierarchy
+- premium SaaS quality
+- excellent mobile responsiveness
+
+Avoid:
+- excessive gradients
+- excessive glassmorphism
+- neon AI aesthetics
+- clutter
+- too many borders
+- dense dashboards
+- unnecessary icons
+- flashy animation that distracts from conversation
+
+### Interview room
+
+The interview room should feel immersive.
+
+Important elements:
+- prominent AI voice presence / animated voice orb
+- clear participant speaking/listening state
+- live transcript
+- easy voice/text switching
+- interactive visuals appearing naturally inside the conversation
+- charts/cards/sliders should feel integrated, not embedded as external widgets
+- subtle transitions when the AI introduces a visual
+- clear indication when AI is listening, thinking or speaking
+- no camera UI
+
+The participant should feel like they are speaking with a skilled researcher, not filling a form.
+
+### Founder experience
+
+Founder dashboard should remain clean and evidence-focused.
+
+Prioritize:
+- studies
+- interviews
+- findings
+- evidence
+- participant signals
+
+Avoid overwhelming users with metrics that do not help research decisions.
+
+### Design quality bar
+
+Every screen should look launch-ready rather than like a developer prototype.
+
+Desktop and mobile should both feel deliberately designed.
+
+Accessibility, readability and performance take priority over decorative effects.

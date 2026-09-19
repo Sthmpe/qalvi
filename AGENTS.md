@@ -29,6 +29,7 @@ These documents are the current source of truth.
 13. Before large refactors or architecture changes, explain the proposed change first.
 14. Keep API secrets server-side.
 15. Never expose Groq, LiveKit, Supabase service-role, or other private keys to the browser.
+16. UI work must follow the premium, modern and restrained design direction defined in docs/PRODUCT.md. Do not default to generic dashboard or chatbot styling.
 
 ## Current Stack
 
