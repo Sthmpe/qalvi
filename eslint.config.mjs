@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Python dependencies are vendor code, not application JavaScript.
+    "agent/.venv/**",
+    // Editor snapshots contain obsolete copies of source files.
+    ".history/**",
   ]),
 ]);
 

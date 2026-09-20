@@ -8,6 +8,8 @@ export interface TranscriptMessage {
   id: string;
   speaker: Speaker;
   text: string;
+  isFinal?: boolean;
+  revision?: number;
 }
 
 export interface ConceptOption {

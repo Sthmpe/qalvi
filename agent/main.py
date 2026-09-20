@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli
 from livekit.plugins import groq, silero
+from latency import install_latency_logging
 
 load_dotenv()
 
@@ -37,12 +38,16 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
+    stt = groq.STT(model="whisper-large-v3-turbo")
+    llm = groq.LLM(model="openai/gpt-oss-120b")
+    tts = groq.TTS(model="canopylabs/orpheus-v1-english", voice="autumn")
     session = AgentSession(
         vad=silero.VAD.load(),
-        stt=groq.STT(model="whisper-large-v3-turbo"),
-        llm=groq.LLM(model="openai/gpt-oss-120b"),
-        tts=groq.TTS(model="canopylabs/orpheus-v1-english", voice="autumn"),
+        stt=stt,
+        llm=llm,
+        tts=tts,
     )
+    install_latency_logging(session, room_name=ctx.room.name, stt=stt, llm=llm, tts=tts)
 
     agent = Agent(instructions=INSTRUCTIONS)
 

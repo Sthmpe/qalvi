@@ -10,7 +10,7 @@ export default function Transcript({ messages }: TranscriptProps) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length]);
+  }, [messages]);
 
   if (messages.length === 0) {
     return (
@@ -27,6 +27,7 @@ export default function Transcript({ messages }: TranscriptProps) {
       {messages.map((message) => (
         <div
           key={message.id}
+          aria-busy={message.isFinal === false}
           className={`flex animate-fade-in-up ${
             message.speaker === "ai" ? "justify-start" : "justify-end"
           }`}
