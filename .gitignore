@@ -51,3 +51,6 @@ agent/.venv/
 agent/__pycache__/
 agent/**/__pycache__/
 *.pyc
+
+# local CLI tools (e.g. the LiveKit `lk` binary) — not source, not committed
+/tools/
