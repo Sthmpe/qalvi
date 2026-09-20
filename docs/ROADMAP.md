@@ -32,6 +32,8 @@ No database required initially if unnecessary.
 
 ## Milestone 2 — Live Voice
 
+Status: Complete — 2026-09-20. End-to-end validation confirmed.
+
 Goal:
 Participant can speak naturally with AI.
 
@@ -46,7 +48,22 @@ Tasks:
 - ability to type instead
 - switch between voice and text
 
+Delivered and validated:
+- realtime LiveKit voice proven end-to-end
+- Groq Whisper STT (`whisper-large-v3-turbo`)
+- Groq-hosted GPT-OSS 120B LLM (`openai/gpt-oss-120b`)
+- Groq Orpheus TTS (`canopylabs/orpheus-v1-english`, voice `autumn`)
+- Python agent deployed to LiveKit Cloud because the local CPU cannot run the native inference dependency
+- voice/text switching within one LiveKit session, preserving conversation context
+- transcript deduplication using stable segment IDs, with interim updates and single finalization
+- development-only latency diagnostics for speech end, STT final, LLM first token, TTS first audio, and playback
+
+Validation: TypeScript, lint, production build, and nine regression tests passed.
+Live latency baselines remain to be collected with the diagnostics; no model or latency optimization was included.
+
 ## Milestone 3 — Interactive Visuals
+
+Status: Not started.
 
 Goal:
 AI can display interactive research material during interview.
