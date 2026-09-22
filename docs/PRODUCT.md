@@ -2,17 +2,36 @@
 
 ## Product
 
-Qalvi is an AI-powered customer research and Product-Market Fit experimentation platform.
+Qalvi is an AI-powered conversation and research platform.
 
-It allows founders, startups, product teams and researchers to create a study, share an interview link with participants, and let an AI researcher conduct adaptive qualitative interviews.
+It helps founders, product teams, researchers, sales teams, agencies, and other teams conduct structured conversations with customers, prospects, users, and communities. The intended workflow is to define a study, share a participant link, and conduct adaptive conversations through an AI interviewer.
 
-Qalvi is not intended to be merely a survey builder or generic chatbot.
+Qalvi is not a personal AI assistant or a recruitment/job-interview product. It is not intended to be merely a survey builder or generic chatbot.
+
+Current use cases: customer discovery, PMF research, product research, concept testing, pricing research, customer feedback, sales discovery/client conversations, and conversational surveys/research.
+
+## Evidence is the source of truth
+
+**Raw interview evidence is the source of truth. AI-generated findings are derived from it and never replace it.**
+
+The intended hierarchy is `Study → Participant → Conversation → Raw Evidence → Derived Findings`.
+
+Original messages retain stable identities, speaker attribution, and ordering. Derived findings reference their supporting conversation and message IDs; they do not rewrite, replace, or hide original messages. Teams must be able to inspect, search, and filter original participant messages themselves, including evidence that challenges a finding.
+
+M2.5 demonstrates these relationships with clearly labeled local fixtures, searchable sample transcript excerpts, and findings linked to source messages. No real interview evidence is persisted yet.
+
+## Two distinct experiences
+
+- Researcher/team workspace: define research questions, browse studies, inspect participant conversations, and review findings alongside their sources. M2.5 is a UI foundation, not an authenticated team workspace.
+- Participant experience: a focused mobile-friendly voice/text conversation. No researcher sidebar, dashboard metrics, or camera. Switching input mode preserves one conversation.
+
+M2.5 preserves the validated `/interview/demo` LiveKit flow. The dynamic participant invitation is explicitly a sample preview; sample study goals are not passed to the live demo agent.
 
 The long-term product should help users turn customer conversations into evidence about whether a product, feature, price, business model or concept should be built.
 
 ## Core Product Idea
 
-A founder describes:
+A researcher describes:
 
 - what they are thinking of building
 - who they want to interview
@@ -40,7 +59,7 @@ They can:
 
 The AI adapts its questions based on previous answers.
 
-After interviews, Qalvi helps the founder understand:
+After interviews, Qalvi helps the researcher understand:
 
 - recurring pain points
 - current customer behaviour
@@ -120,8 +139,10 @@ Primary initial users:
 - product managers
 - UX researchers
 - innovation teams
+- sales and client-facing teams
+- agencies and community research teams
 
-Initial focus is founders trying to validate an idea or reach Product-Market Fit.
+Founders validating ideas and researching Product-Market Fit remain a core audience, alongside teams studying customer, prospect, user, and community experiences.
 
 ## First Real Study
 
@@ -175,7 +196,7 @@ Founder can open the interview afterwards and review it.
 Do NOT build yet:
 
 - payments/subscriptions
-- teams/workspaces
+- team membership, permissions, and workspace management (a visual researcher shell is included in M2.5)
 - participant marketplace
 - automatic participant recruitment
 - video interviews
@@ -247,9 +268,9 @@ Important elements:
 
 The participant should feel like they are speaking with a skilled researcher, not filling a form.
 
-### Founder experience
+### Researcher/team experience
 
-Founder dashboard should remain clean and evidence-focused.
+The researcher workspace should remain clean and evidence-focused.
 
 Prioritize:
 - studies
@@ -267,3 +288,12 @@ Every screen should look launch-ready rather than like a developer prototype.
 Desktop and mobile should both feel deliberately designed.
 
 Accessibility, readability and performance take priority over decorative effects.
+### M2.5 visual identity
+
+Use charcoal `#25282D`, graphite `#4B4F58`, cool grey `#8B8F9A`, soft grey `#F3F4F6`, off-white `#FAF9F7`, indigo `#4F46E5`, and light indigo `#8B7DFF`. Body text uses graphite; cool grey is secondary/decorative. A glowing indigo orb is the signature Qalvi interviewer identity. Localize gradients to the orb.
+
+Use local Geist fonts, generous spacing, subtle depth, restrained borders, and calm movement with reduced-motion support. The desktop researcher shell has a charcoal sidebar and off-white content canvas. Mobile uses compact workspace navigation, stacked content, and scrollable study tabs. Participant pages remain focused and separate.
+
+### M2.5 scope boundary
+
+Local mock studies, counts, participants, transcript excerpts, and hand-authored findings illustrate the product. The new-study screen previews an unsaved research brief only. Settings are read-only. No Supabase, authentication, billing, permissions, real study creation, AI findings generation, OpenRouter/model switching, recruitment/job interviews, or Milestone 3 interactive visuals.

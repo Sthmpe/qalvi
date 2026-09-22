@@ -111,6 +111,12 @@ Never allow an unsupported AI summary to become the only research record.
 
 Raw transcript is always preserved.
 
+The hierarchy is `Study → Participant → Conversation → Raw Evidence → Derived Findings`.
+
+Raw interview evidence is the source of truth. Findings must not replace messages or turn interpretations into participant quotes. Researchers must eventually be able to inspect, search, and filter messages independently of a summary, including counter-evidence.
+
+M2.5 demonstrates this with sample messages and explicit finding-to-message links, not generated agent findings. Actual storage, durable evidence guarantees, and AI findings generation remain unimplemented. The validated M2 realtime transcript is still session-local.
+
 ## Voice and Text
 
 Voice and text feed into the same interview engine.

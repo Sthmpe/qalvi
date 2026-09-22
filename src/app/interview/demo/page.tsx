@@ -3,7 +3,7 @@ import InterviewRoom from "@/components/interview/InterviewRoom";
 
 export const metadata: Metadata = {
   title: "Qalvi — Interview",
-  description: "A mocked participant interview experience for Qalvi.",
+  description: "A realtime voice and text research conversation with Qalvi.",
 };
 
 export default function InterviewDemoPage() {

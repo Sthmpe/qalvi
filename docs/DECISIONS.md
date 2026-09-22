@@ -65,6 +65,8 @@ It is an AI-powered PMF/customer-research experimentation platform capable of co
 
 This positioning remains a hypothesis and should change if user evidence suggests otherwise.
 
+This original positioning is superseded by the M2.5 positioning decision below.
+
 ## 2026-09-20 — Milestone 2 complete
 
 Decision:
@@ -89,3 +91,19 @@ TypeScript, lint, production build, and nine regression tests passed. End-to-end
 
 Scope:
 Preserve the current UI and models. Milestone 3 has not started.
+
+## 2026-09-22 — M2.5 product and UI foundation
+
+Qalvi is an AI-powered conversation and research platform for founders, product teams, researchers, sales teams, agencies, and other teams conducting structured conversations with customers, prospects, users, or communities. It is not a personal assistant or recruitment/job-interview product.
+
+Current use cases: customer discovery, PMF research, product research, concept testing, pricing research, customer feedback, sales discovery/client conversations, and conversational surveys/research.
+
+Raw interview evidence is the source of truth. AI-generated findings are derived from it and never replace it. Use Study → Participant → Conversation → Raw Evidence → Derived Findings. Researchers must be able to inspect/search/filter original messages, independently of interpretations.
+
+Build a researcher shell and local-data workspace before Milestone 3 to establish the product foundation. Use charcoal, off-white, indigo, local Geist, a glowing Qalvi orb, restrained cards, generous spacing, and deliberate desktop/mobile layouts. Scope the visual tokens to researcher and invitation surfaces; preserve the validated realtime room and provider configuration.
+
+Use a `(research)` route group for `/dashboard`, `/studies`, `/studies/new`, and `/studies/[studyId]` with overview, interviews, participants, findings, and settings. `/interview/[studyId]` sits outside the shell. `/interview/demo` retains the live flow. `/` opens the research dashboard.
+
+Counts and findings derive from clearly labeled local fixtures. The brief is unsaved page state; settings are read-only. Copied participant links open sample invitations. The test interview opens the shared LiveKit agent, not a study-specific interview. Source-message links demonstrate traceability but no real interview evidence is saved.
+
+Deferred: Supabase, authentication, billing, team permissions, real study creation, study-specific agent configuration, AI findings generation, OpenRouter/model switching, recruitment/job interviews, and interactive visuals. Milestone 3 remains unstarted. M2.5 changes remain uncommitted pending a separate user request.

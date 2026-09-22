@@ -61,6 +61,27 @@ Delivered and validated:
 Validation: TypeScript, lint, production build, and nine regression tests passed.
 Live latency baselines remain to be collected with the diagnostics; no model or latency optimization was included.
 
+## M2.5 — Product and UI Foundation
+
+Status: Implemented — 2026-09-22. Local UI foundation; no persistence or real study creation.
+
+Delivered:
+- conversation and research positioning for founders, product, research, sales, agencies, and other teams
+- distinct researcher workspace and participant experiences
+- evidence hierarchy: Study → Participant → Conversation → Raw Evidence → Derived Findings
+- responsive researcher shell, dashboard, study library, and nested study workspace
+- reusable navigation, cards, buttons, badges, headings, empty states, and Qalvi orb
+- charcoal/off-white/indigo visual identity with local Geist fonts
+- sample transcript search/speaker filtering and derived findings linked to original messages
+- unsaved local research-brief preview, read-only settings, participant invitation preview
+- preserved `/interview/demo` LiveKit voice/text flow, deduplication, and latency diagnostics
+
+Excluded: Supabase, auth, billing, team permissions, real study creation, study-specific agent setup, AI findings generation, new models/OpenRouter, recruitment/job interviews, and Milestone 3 interactive visuals.
+
+This previews later researcher workflows; it does not complete the persistence, study-system, or results-backend milestones below.
+
+Validation: `npx tsc --noEmit`, `npm run lint`, and `npm run build` passed, along with all seven existing interview regression tests. Browser inspection covered desktop (1440px), tablet (768px), and mobile (390px/320px), source links, search/filtering, brief preview, clipboard success/failure, reduced motion, and unknown study IDs. No inspected page overflow or runtime exceptions. The existing development slow-filesystem warning remains. No new cloud voice session was exercised; live transport/agent code is unchanged. Changes remain uncommitted.
+
 ## Milestone 3 — Interactive Visuals
 
 Status: Not started.

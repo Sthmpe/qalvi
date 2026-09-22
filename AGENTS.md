@@ -1,6 +1,8 @@
 # Qalvi — Agent Instructions
 
-Qalvi is an AI-powered customer research and PMF experimentation platform.
+Qalvi is an AI-powered conversation and research platform for founders, product teams, researchers, sales teams, agencies, and other teams. It is not a personal assistant or recruitment/job-interview product.
+
+Raw interview evidence is the source of truth. Derived findings never replace it. Preserve: Study → Participant → Conversation → Raw Evidence → Derived Findings.
 
 Before making any code or architecture changes, read:
 
@@ -55,7 +57,7 @@ Voice/text interview
 → transcript
 → stored interview evidence.
 
-Avoid premature SaaS features such as billing, teams, complex permissions, participant marketplaces, and advanced analytics until the core interview works.
+M2.5 adds a local-data researcher/team UI shell while preserving the validated realtime interview. This does not authorize billing, authentication, team permissions, persistence, real study creation, participant marketplaces, or advanced analytics. See ROADMAP for the exact active scope.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
