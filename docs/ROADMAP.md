@@ -84,7 +84,7 @@ Validation: `npx tsc --noEmit`, `npm run lint`, and `npm run build` passed, alon
 
 ## Milestone 3 — Interactive Visuals
 
-Status: Not started.
+Status: Implemented; final live acceptance pending — 2026-09-22. Adaptive conversational control added after the first live test; changes uncommitted.
 
 Goal:
 AI can display interactive research material during interview.
@@ -96,6 +96,31 @@ Initial components:
 - multiple choice
 
 Participant interactions become interview evidence.
+
+Delivered:
+- one `DisplayAction` union for exactly these four types, validated at the browser boundary before rendering
+- one predefined React component per type inside the evolved `VisualStage`; the M1 `ConceptCard` and mock data were removed
+- the agent sends actions over the `qalvi.display` text stream; application code (`agent/visuals.py`) decides when, the LLM only receives a per-turn note about what is on screen
+- on-screen answers travel back over the existing `lk.chat` path, prefixed `[On screen]`, and appear in the session transcript as participant evidence
+- a deterministic preview of all four visuals at `/interview/demo/visuals`
+- regression tests: 18 Node tests (validation, summaries, session transport, replay and send races) and 6 Python tests (demo-room gate, sequence, latency)
+- conversational control at the single per-turn seam: model-read signals (intent, engagement, covered topics, follow-up value) combined by a small conductor with the plan and an optional time budget; concerns are addressed before the plan advances, fatigue and stop intent shorten or close, covered topics are retired, visuals are tools rather than steps, and a `null` display clears the screen
+- optional time budget (starts on first participant turn, active-time exclusions, focus/closing/over phases, real timing answers, no countdown) and conservative inactivity check-ins
+- goal anchoring in every reply note (goal, current objective, learned, unresolved, stage) with natural redirection for detours and participant questions, stop-intent correction, unintelligible-input handling, and a stall guard against endless exploration
+- text-only degradation when speech synthesis fails (TTS 429 no longer closes the session), failure classification, and an `AgentHandoff` crash fix in the conversation-item callback
+- coverage strength (untouched, partially answered, sufficiently answered) so a topic mentioned in passing keeps its visual, tool awareness so Qalvi answers truthfully about what it can show and can surface a relevant unused visual on request, and an ambiguity guard so unclear wording never becomes evidence
+- an authoritative active-visual lifecycle (emitted, waiting, answered, cleared or replaced) carried into every reply, so Qalvi explains what is on screen instead of denying it, plus a check-in guard so one participant turn cannot produce repeated questions, and a plain-speech filter that keeps markdown, HTML entities, and internal markers out of the voice and the transcript
+- regression tests now: 32 Node tests and 89 Python tests (conductor scenarios, visuals as tools, active visual lifecycle and supported interactions, ambiguity, plain speech, clock, presence, signal parsing, visuals, failures, opening, latency)
+
+Final acceptance pass: TypeScript, lint, production build, and Node regression tests passed.
+Both participant pages passed browser checks at 320, 390, 768, and 1440px, including
+editable draft answers and gallery-only confirmations. The first live room connected and
+the AI answered typed input, but no visual appeared, and the agent followed its planned sequence rather than the participant; the conductor above replaces that behaviour and awaits its own live test. LiveKit Cloud still runs the
+September 20 M2 deployment. The user requested that deployment remain unchanged.
+Natural visual delivery, live visual-answer follow-up, and fresh end-to-end voice
+acceptance therefore remain unverified. Do not mark M3 complete or start M4 yet.
+
+Excluded: LLM-chosen or LLM-authored display actions, study-specific visual configuration, persistence of interactions (Milestone 4), Recharts (not needed for these four), and any visual types beyond the four above.
 
 ## Milestone 4 — Supabase Persistence
 

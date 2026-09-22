@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test tests/interview.test.mjs tests/visuals.test.mjs"
   },
   "dependencies": {
     "livekit-client": "^2.22.3",

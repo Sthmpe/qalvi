@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { getStudy } from "@/lib/research/mock-data";
 import { QalviOrb } from "@/components/ui/primitives";
 import "../../(research)/research.css";
-export const metadata = { title: "Qalvi — Conversation invitation" };
+export const metadata = { title: "Qalvi: Conversation invitation" };
 export default async function ParticipantPreview({
   params,
 }: {

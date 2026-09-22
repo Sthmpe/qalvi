@@ -1,4 +1,5 @@
-export type InterviewStatus = "idle" | "connecting" | "listening" | "thinking" | "speaking";
+export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "failed";
+export type InterviewStatus = "idle" | "connecting" | "reconnecting" | "disconnected" | "failed" | "ready" | "waiting" | "delayed" | "listening" | "thinking" | "speaking";
 
 export type InputMode = "voice" | "text";
 
@@ -10,12 +11,6 @@ export interface TranscriptMessage {
   text: string;
   isFinal?: boolean;
   revision?: number;
-}
-
-export interface ConceptOption {
-  id: string;
-  label: string;
-  description: string;
-  /** Mocked comparison metric, 0-100, used to draw the mini bar chart. */
-  interestScore: number;
+  /** Set when the participant answered with an on-screen visual instead of speaking or typing. */
+  source?: "visual";
 }

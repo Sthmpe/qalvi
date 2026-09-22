@@ -3,14 +3,18 @@
 import { useState } from "react";
 import VoiceOrb from "./VoiceOrb";
 import Transcript from "./Transcript";
+import VisualStage from "./VisualStage";
 import InterviewControls from "./InterviewControls";
 import { useLiveKitSession } from "./useLiveKitSession";
 import type { InputMode } from "./types";
+import ParticipantHeader from "./ParticipantHeader";
+import "./participant.css";
 
 export default function InterviewRoom() {
   const [mode, setMode] = useState<InputMode>("voice");
   const liveKit = useLiveKitSession();
   const started = liveKit.isActive || liveKit.status === "connecting";
+  const connected = liveKit.connection === "connected" && liveKit.agentReady;
 
   async function handleToggleMode() {
     const next = mode === "voice" ? "text" : "voice";
@@ -18,23 +22,42 @@ export default function InterviewRoom() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[var(--background)]">
-      <header className="flex items-center justify-between px-6 py-5 sm:px-10">
-        <span className="text-sm font-semibold tracking-tight text-[var(--foreground)]">Qalvi</span>
-        <span className="text-xs text-[var(--muted)]">Research Session</span>
-      </header>
+    <div className={`participant-room ${started ? "is-started" : "is-idle"} ${liveKit.display ? "has-visual" : ""}`}>
+      <ParticipantHeader />
 
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-5 pb-8 sm:px-8">
-        <div className="flex flex-col items-center gap-6 pt-4 pb-8 sm:pt-8">
+      <main className="conversation-room">
+        <div className="interviewer-presence">
           <VoiceOrb status={liveKit.status} />
+          <div className="conversation-intro">
+            <p className="participant-eyebrow">YOUR PERSPECTIVE MATTERS</p>
+            <h1>{started ? "Room for your perspective." : "A little space to be heard."}</h1>
+            <p>{started ? "Speak naturally or type. There are no right or wrong answers." : "Share your experiences with Qalvi, your AI interviewer. Follow the conversation wherever it leads."}</p>
+          </div>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-5">
-          <div className="min-h-[9rem] flex-1 rounded-3xl border border-[var(--border)] bg-[var(--surface)]/40 p-3 sm:min-h-[12rem]">
+        <div className="conversation-content">
+          {liveKit.display && (
+            <VisualStage
+              key={liveKit.display.id}
+              action={liveKit.display}
+              response={liveKit.displayResponse}
+              busy={liveKit.sending || !connected || !liveKit.visualReady}
+              onRespond={(response) => void liveKit.respondToDisplay(response)}
+            />
+          )}
+          <section className="conversation-transcript" aria-label="Conversation transcript">
+            <div className="transcript-heading"><h2>Your conversation</h2><span>{started ? "Live transcript" : "Voice or text"}</span></div>
             <Transcript messages={liveKit.messages} />
-          </div>
+          </section>
+          {liveKit.connection === "connected" && liveKit.turn && liveKit.turn !== "responding" && <p role="status" className="interview-notice">
+            {liveKit.turn === "delayed" ? "Qalvi is taking longer than expected. Your conversation is kept here. You do not need to send your answer again." : liveKit.turn === "opening" ? "Qalvi is preparing the opening question." : "Your answer was sent. Waiting for Qalvi to respond."}
+          </p>}
+          {liveKit.connection === "reconnecting" && <p role="status" className="interview-notice">Reconnecting. Your conversation and draft are kept here.</p>}
+          {liveKit.connection === "connected" && !liveKit.voiceAvailable && <p role="status" className="interview-notice">Qalvi&apos;s voice is unavailable for now. Replies appear here as text, and you can keep speaking or typing.</p>}
+          {liveKit.connection === "failed" && <button type="button" className="interview-reconnect" onClick={() => void liveKit.reconnect()}>Reconnect interview</button>}
+          {liveKit.display && !liveKit.visualReady && <p className="interview-notice">This visual is kept for reference. You can answer in words or wait for Qalvi to share a new visual.</p>}
           {liveKit.error && (
-            <div role="alert" className="animate-fade-in-up rounded-2xl border border-[var(--border)] bg-[var(--surface)]/60 px-4 py-3 text-center text-sm text-[var(--muted)]">
+            <div role="alert" className="interview-notice">
               <p>{liveKit.error}</p>
             </div>
           )}
@@ -46,12 +69,12 @@ export default function InterviewRoom() {
           )}
         </div>
 
-        <div className="mt-8 flex justify-center">
+        <div className="conversation-controls">
           <InterviewControls
             started={started}
             status={liveKit.status}
             mode={mode}
-            connected={liveKit.isActive && liveKit.agentReady}
+            connected={connected}
             micEnabled={liveKit.micEnabled}
             micBusy={liveKit.micBusy}
             sending={liveKit.sending}

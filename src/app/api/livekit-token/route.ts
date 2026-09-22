@@ -30,6 +30,8 @@ export async function POST(request: NextRequest) {
   const token = new AccessToken(apiKey, apiSecret, {
     identity,
     ttl: "15m",
+    // A replacement agent must not greet as if this were a fresh interview.
+    attributes: { "qalvi.resume": body.resume === true ? "true" : "false" },
   });
 
   token.addGrant({

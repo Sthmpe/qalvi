@@ -101,3 +101,43 @@ body {
     animation: none;
   }
 }
+
+/* Slider visual: native range input on the room's tokens, filled up to --fill. */
+.qalvi-range {
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 9999px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 0 / var(--fill, 0%) 100% no-repeat,
+    color-mix(in srgb, var(--border) 60%, transparent);
+  cursor: pointer;
+}
+.qalvi-range:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.qalvi-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 8px;
+}
+.qalvi-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 8px -2px var(--accent);
+}
+.qalvi-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 8px -2px var(--accent);
+}
+.qalvi-range::-moz-range-track {
+  background: transparent;
+}

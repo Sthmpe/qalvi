@@ -6,44 +6,47 @@ interface TranscriptProps {
 }
 
 export default function Transcript({ messages }: TranscriptProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const container = scrollRef.current;
+    if (container && following.current) {
+      container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    }
   }, [messages]);
 
   if (messages.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center">
-        <p className="text-sm text-[var(--muted)]">
-          Your conversation will appear here once the interview begins.
-        </p>
+      <div className="transcript-empty">
+        <span aria-hidden="true">“</span>
+        <p>A good conversation starts with you.</p>
+        <small>Your words and Qalvi’s questions will appear here.</small>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto px-1 py-2">
+    <div className="transcript-scroll" ref={scrollRef} tabIndex={0} aria-label="Transcript messages"
+      onScroll={(event) => { const node = event.currentTarget; following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 60; }}>
       {messages.map((message) => (
         <div
           key={message.id}
           aria-busy={message.isFinal === false}
-          className={`flex animate-fade-in-up ${
-            message.speaker === "ai" ? "justify-start" : "justify-end"
-          }`}
+          className={`transcript-message ${message.speaker === "ai" ? "interviewer" : "participant"}`}
         >
-          <div
-            className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm sm:max-w-[75%] ${
-              message.speaker === "ai"
-                ? "rounded-tl-sm bg-[var(--surface)] text-[var(--foreground)]"
-                : "rounded-tr-sm bg-[var(--accent)] text-white"
-            }`}
-          >
-            {message.text}
+          <div>
+            <div className="transcript-attribution"><strong>{message.speaker === "ai" ? "Qalvi" : "You"}</strong>
+            {message.source === "visual" && (
+              <span>
+                On screen
+              </span>
+            )}
+            {message.isFinal === false && <span>Transcribing…</span>}</div>
+            <p>{message.text}</p>
           </div>
         </div>
       ))}
-      <div ref={bottomRef} />
     </div>
   );
 }

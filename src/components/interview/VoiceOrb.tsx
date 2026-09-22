@@ -7,6 +7,12 @@ interface VoiceOrbProps {
 const STATUS_LABEL: Record<InterviewStatus, string> = {
   idle: "Ready when you are",
   connecting: "Connecting",
+  reconnecting: "Reconnecting",
+  disconnected: "Disconnected",
+  failed: "Connection lost",
+  ready: "Ready",
+  waiting: "Waiting for Qalvi",
+  delayed: "Response delayed",
   listening: "Listening",
   thinking: "Thinking",
   speaking: "Speaking",
@@ -18,8 +24,8 @@ const STATUS_LABEL: Record<InterviewStatus, string> = {
  */
 export default function VoiceOrb({ status }: VoiceOrbProps) {
   return (
-    <div className="flex flex-col items-center gap-5">
-      <div className="relative flex h-40 w-40 items-center justify-center sm:h-48 sm:w-48">
+    <div className="voice-presence flex flex-col items-center gap-5">
+      <div className="voice-orbit relative flex h-40 w-40 items-center justify-center sm:h-48 sm:w-48">
         {/* Ambient rings — only animate while actively listening/speaking */}
         <span
           aria-hidden
@@ -40,7 +46,7 @@ export default function VoiceOrb({ status }: VoiceOrbProps) {
 
         {/* Core orb */}
         <div
-          className={`relative h-24 w-24 rounded-full bg-[radial-gradient(circle_at_35%_30%,var(--accent-soft),var(--accent)_70%)] shadow-[0_0_40px_-8px_var(--accent)] transition-transform duration-700 ease-out sm:h-28 sm:w-28 ${
+          className={`voice-core relative h-24 w-24 rounded-full bg-[radial-gradient(circle_at_35%_30%,var(--accent-soft),var(--accent)_70%)] shadow-[0_0_40px_-8px_var(--accent)] transition-transform duration-700 ease-out sm:h-28 sm:w-28 ${
             status === "thinking" || status === "connecting" ? "animate-orb-breathe" : ""
           } ${status === "speaking" ? "scale-105" : "scale-100"} ${
             status === "connecting" ? "opacity-70" : "opacity-100"
@@ -55,7 +61,7 @@ export default function VoiceOrb({ status }: VoiceOrbProps) {
         </div>
       </div>
 
-      <p className="text-sm font-medium tracking-wide text-[var(--muted)]">
+      <p role="status" className="voice-status text-sm font-medium tracking-wide text-[var(--muted)]">
         {STATUS_LABEL[status]}
       </p>
     </div>

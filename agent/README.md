@@ -1,10 +1,45 @@
-# Qalvi Voice Agent (Milestone 2 proof-of-concept)
+# Qalvi Voice Agent (Milestone 2 voice, Milestone 3 visuals)
 
 A small Python [LiveKit Agents](https://docs.livekit.io/agents/) worker that
 joins the same LiveKit room as the participant's browser and runs a
 Groq-powered STT → LLM → TTS pipeline. See `../AGENTS.md` and `../docs/` for
 product context — this service intentionally contains no interview-engine,
 Supabase, or Korra-specific logic yet.
+
+## Visuals and conversational control (Milestone 3)
+
+`visuals.py` holds the demo plan: four predefined visuals (comparison cards, bar
+chart, slider, multiple choice), each with a topic key, purpose, and priority.
+They are tools, not mandatory steps.
+
+Every participant turn passes through `Interviewer.present()`:
+
+1. `signals.py` asks the model for a small structured reading of the turn
+   (intent, engagement, covered topics, whether a follow-up is useful). Failures
+   or timeouts fall back to neutral signals.
+2. `conductor.py` combines that with the plan and the optional `clock.py` time
+   budget and decides whether to show a visual (JSON on the `qalvi.display`
+   text stream), clear one (`null` on the same stream), continue, shorten, or close.
+3. The reply model receives a one-turn note. It never authors visuals.
+
+Answers come back on `lk.chat` prefixed `[On screen]`. Every note carries the
+research anchor (goal, current objective, learned, unresolved, stage) and the
+action chosen. Concerns are addressed before the plan advances; detours and
+participant questions are bridged back; fatigue compresses the path; stop intent
+closes unless corrected; garbled input learns nothing; covered topics are not
+asked again. `presence.py` allows at most two gentle check-ins
+after genuine inactivity. The demo plan and its ten-minute budget apply only to
+`qalvi-demo-*` rooms; other rooms have no visuals and no budget. Requires
+`livekit-agents >= 1.8`.
+
+## When speech synthesis fails
+
+`failures.py` classifies session errors (signaling, `stt`, `llm`, `tts`, `tts_rate_limit`).
+A TTS failure is voice-only: on the first unrecoverable one the agent disables audio
+output, publishes `qalvi.voice: "unavailable"`, and the interview continues in text
+with the transcript, conductor state, and visuals intact. Without this, LiveKit closes
+the session after three consecutive unrecoverable errors. Voice does not come back
+within a session, and there is no second TTS provider yet.
 
 ## Setup
 
@@ -85,7 +120,10 @@ has been recorded by the offline regression tests.
 Local regression checks (no API requests):
 
 ```powershell
-node --test tests/interview.test.mjs # from the repository root
+npm test                              # from the repository root
 cd agent
-.venv\Scripts\python.exe -m unittest test_latency.py
+.venv\Scripts\python.exe -m unittest test_conductor.py test_clock.py test_visuals.py test_latency.py
 ```
+
+After changing agent code, redeploy the LiveKit Cloud agent from the repository
+root with `tools\livekit\lk.exe agent deploy agent`.

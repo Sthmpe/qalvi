@@ -107,3 +107,144 @@ Use a `(research)` route group for `/dashboard`, `/studies`, `/studies/new`, and
 Counts and findings derive from clearly labeled local fixtures. The brief is unsaved page state; settings are read-only. Copied participant links open sample invitations. The test interview opens the shared LiveKit agent, not a study-specific interview. Source-message links demonstrate traceability but no real interview evidence is saved.
 
 Deferred: Supabase, authentication, billing, team permissions, real study creation, study-specific agent configuration, AI findings generation, OpenRouter/model switching, recruitment/job interviews, and interactive visuals. Milestone 3 remains unstarted. M2.5 changes remain uncommitted pending a separate user request.
+
+## 2026-09-22 — Milestone 3 interactive visuals
+
+Decision:
+Support exactly four visuals (comparison cards, bar chart, slider, multiple choice) with the smallest architecture that fits them: one discriminated `DisplayAction` union, one hand-written validator, one component per type, and the existing `VisualStage` as the switch. No registry, plugin system, schema engine, or component factory. The M1 `ConceptCard` and mock data were replaced rather than kept alongside.
+
+Reason:
+Rule 2 and rule 7. Four fixed types do not justify an extensibility layer, and a hand-written validator keeps the boundary explicit: the AI supplies data, never markup or code.
+
+Transport:
+Reuse the M2 LiveKit session. The agent sends a visual on the `qalvi.display` text stream. The participant's answer goes back on `lk.chat`, the same path as typed input, prefixed `[On screen]`, so the LLM sees one conversation and the transcript records the answer as participant evidence.
+
+Triggering:
+In M3 application code decides when a visual appears (a fixed demo sequence, one visual per spoken or typed turn). The LLM receives a short per-turn note describing what is on screen and what to ask. It does not choose or author display actions. Connecting constrained LLM-triggered visuals is a later decision.
+
+Text input:
+LiveKit Agents runs `on_user_turn_completed` for speech only, so a text-input callback that mirrors the framework default (interrupt, then reply) runs the same visual logic for typed messages. Session behaviour for typed text is otherwise unchanged. `livekit-agents` is pinned to `~=1.8` for `RoomOptions` and `TextInputOptions`.
+
+Charts:
+The bar chart is rendered with plain elements from supplied values. Recharts stays uninstalled until a visual needs it.
+
+Copy:
+Product copy avoids em dashes.
+
+### Final M3 acceptance, 2026-09-22
+
+Keep the existing cloud deployment unchanged at the user's request. It predates
+M3, so local validation does not establish live M3 acceptance. M3 remains
+implemented with acceptance pending, not complete; M4 has not started.
+
+The fixed visual sequence is restricted to `qalvi-demo-*` rooms and must not be
+used as the default logic for future real studies. Replayed visual IDs are ignored;
+stale callbacks cannot resubmit an answer, and a completed send cannot lock a newer
+visual. Agent guidance uses the current confirmation labels and explicitly says
+not to speak the `[On screen]` transport marker. These agent changes require a
+future approved deployment and live verification.
+
+## 2026-09-22 — Adaptive conversational control and optional time budget
+
+Decision:
+The first live M3 test showed Qalvi following its planned visual sequence instead of responding to the participant. Replace the fixed sequence with one small control layer at the existing per-turn seam. The model reads each participant turn into a few structured signals (intent, engagement, covered topics, follow-up value); a deterministic conductor combines them with the plan and the optional time budget; the reply model gets a short note for that reply only.
+
+Principles:
+The research plan guides the interview; it does not control the human. Concerns are addressed before the plan advances and are treated as evidence. Fatigue and stop intent shorten or close the interview; a shorter path may be offered once, never twice. Covered topics are not asked again. Visuals are tools, not steps: they can be shown, skipped, cleared, or switched off as engagement drops. Follow-ups are asked when useful, not mechanically.
+
+Time budget:
+Optional per study. Starts on the first committed participant turn. Active time excludes disconnections, failures, and silence beyond a 90-second grace; ordinary pauses and typing count. Focus at 30% remaining, closing at 10% remaining with a 60-second minimum, over at zero. Evaluated only at turn boundaries, so time never interrupts speech or typing; reaching the budget lets the current response finish, acknowledges it, and closes naturally. No participant-visible countdown. These are configurable defaults; the demo uses ten minutes.
+
+Inactivity:
+At most two gentle check-ins after genuine mutual idleness (60 seconds, 120 in text mode), only while Qalvi is listening and the participant is silent. Never a repeated nag.
+
+Cost:
+One extra short model call per turn for the signals, using the same Groq model at low reasoning with a two-second timeout and neutral fallback. No new dependencies, no persistence, no study engine.
+
+### Addendum, 2026-09-22: goal anchoring
+
+Natural conversation must not lose the research goal. The conductor now carries a research anchor (goal, current objective, learned, unresolved, stage) into every reply note, labels each reply with the decision principle chosen, and handles detours, participant questions, stop corrections, and unintelligible input. Objectives set aside because of a concern return to the plan verbal-only; objectives set aside by a misread stop return in full when the participant corrects it. A stall guard moves to the next objective after three on-topic turns without progress. Still one conductor, no second orchestration layer, same model and provider.
+
+## 2026-09-22 — A TTS failure must not end the interview
+
+Decision:
+Groq TTS returned HTTP 429 repeatedly in the first live M3 run. LiveKit retried three times per turn, emitted an unrecoverable `TTSError`, and closed the `AgentSession` once four consecutive turns had failed (`SessionConnectOptions.max_unrecoverable_errors` defaults to 3). The research conversation died for a speech-output problem.
+
+Degrade instead of dying: on the first unrecoverable TTS error, switch the session to text-only with the framework's own `session.output.set_audio_enabled(False)` and tell the browser through a `qalvi.voice` attribute. LiveKit only runs synthesis when audio output is enabled, so no further TTS calls are made, no further errors are counted, and the session stays alive with transcript, conductor state, visuals, draft, and context intact.
+
+Not done:
+No second TTS provider and no provider failover yet. No automatic voice recovery inside a session, because retrying is what killed the session. No change to the Groq STT or LLM models, the conductor, or the visual schemas.
+
+Also fixed:
+`conversation_item_added` read `event.item.role` on every item and crashed on `AgentHandoff`. Items are now narrowed on the union's own `type` discriminator; only `message` items carry a role.
+
+Participant-facing copy names no provider: the room says Qalvi's voice is unavailable for now, replies appear as text, and speaking or typing both still work.
+
+## 2026-09-22 — Visuals are tools, and coverage has strength
+
+Decision:
+The first live acceptance run produced no visuals at all. The classifier marked a topic
+`covered` as soon as the participant mentioned it in passing, and the conductor deleted
+that step, and its visual, from the plan. A talkative participant could retire every
+visual without ever answering anything precisely. When they then asked why no chart or
+selection had appeared, Qalvi replied that none were part of the interview, which was
+false.
+
+Coverage is now reported at two strengths. `covered` means answered well enough that
+asking again in any form adds nothing, and retires the step as before. `partial` means
+touched but left vague, and keeps the step, because a predefined visual can still
+quantify, compare, expose a tradeoff, reveal a preference, or give an easier way to
+answer. `VISUAL_VALUE` names that value per visual type so the reply model introduces
+the visual as a way to sharpen what was said rather than repeating the question.
+
+The interviewer also knows its own tools. `Conductor.available_visuals()` lists unused
+visual types in plain words, and a `visuals` intent covers a participant asking about or
+asking for one. Qalvi points at what is already on screen, brings up a relevant unused
+visual when they show interest (explicit interest outranks a hold or an earlier
+set-aside), or says truthfully what it can show and why nothing is going up now. It
+never denies having visuals, never names the schema or transport, and does not launch
+one during wrap-up to demonstrate the feature.
+
+A third signal, `ambiguous`, stops Qalvi inventing an answer. In the live run,
+"is it okay jottin it down" was answered as though the participant had described
+shifting work tasks. An ambiguous turn now records no coverage and offers no visual;
+the reply checks in or reflects back only what was actually said.
+
+Not done:
+No study or objective engine, no per-objective evidence model, no scoring. Coverage
+strength is two flags and one list on the conductor. Same conductor, same models,
+same visual schemas and transport, same time budget and stop, fatigue, and detour
+behaviour.
+
+## 2026-09-22 — The screen state is the conductor's, and replies are speech
+
+Decision:
+Three defects from the same live transcript.
+
+Qalvi could deny that a visual existed while one was rendered and waiting for the
+participant. It only learned about a visual when the `[On screen]` answer came back,
+because the note describing a visual was attached to the turn that emitted it and
+never repeated. `Conductor.visual_state()` is now the authoritative record from
+emission until the visual is answered, cleared, or replaced, and every reply note
+carries it: the question it asks, its kind in plain words, what it is for, and whether
+it is still waiting. Clearing became symmetrical, including for confirmed visuals, so
+the conductor never believes the screen is empty while the participant sees something.
+A visual already on screen is explained when asked about, not swapped out.
+
+One participant turn produced three near-identical questions about the interruption
+percentage. The source was not the reply path but the inactivity watcher: a participant
+reading a slider and deciding looks idle, so after 60 and 120 seconds it called
+`generate_reply` twice more, and the model restated the question in context both times.
+`presence.check_in_allowed()` now treats a pending visual as participation, the clock
+opens no absence exclusion during one, and a new watcher cancels any previous one.
+
+Internal presentation syntax reached the participant: an HTML entity, a repeated
+`[On screen]` marker, and markdown emphasis around a button label. `agent/speech.py`
+filters the reply in `Interviewer.llm_node`, which is upstream of both synthesis and
+text forwarding, so speech, transcript, and stored chat item are cleaned in one pass at
+whitespace boundaries without delaying the first spoken words. `[On screen]` remains
+the evidence marker on the participant's own on-screen answers.
+
+Not done:
+No UI change, no provider change, no second orchestration layer, no dedupe of rendered
+text. The filter strips presentation syntax only and never rewrites what Qalvi said.

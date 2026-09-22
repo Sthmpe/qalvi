@@ -1,42 +1,43 @@
-import { useEffect, useState } from "react";
-import ConceptCard from "./ConceptCard";
-import type { ConceptOption } from "./types";
+import BarChart from "./visuals/BarChart";
+import ComparisonCards from "./visuals/ComparisonCards";
+import MultipleChoice from "./visuals/MultipleChoice";
+import Slider from "./visuals/Slider";
+import type { DisplayAction, VisualResponse } from "./visuals/display";
 
 interface VisualStageProps {
-  options: ConceptOption[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  action: DisplayAction;
+  response: VisualResponse | null;
+  busy: boolean;
+  onRespond: (response: VisualResponse) => void;
+  preview?: boolean;
 }
 
 /**
- * The stage where interactive research material (charts, cards, sliders)
- * will appear during the conversation. For Milestone 1 this renders one
- * mocked comparison-card example with an inline mini bar chart.
+ * Where research material appears during the conversation. Each action type
+ * maps to one predefined component; the AI supplies data, never markup.
  */
-export default function VisualStage({ options, selectedId, onSelect }: VisualStageProps) {
-  const [revealed, setRevealed] = useState(false);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setRevealed(true), 150);
-    return () => window.clearTimeout(timer);
-  }, []);
-
+export default function VisualStage({ action, response, busy, onRespond, preview = false }: VisualStageProps) {
   return (
-    <div className="animate-fade-in-up rounded-3xl border border-[var(--border)] bg-[var(--surface)]/60 p-4 sm:p-5">
-      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-[var(--muted)]">
-        Which direction feels closest to what you&apos;d want?
-      </p>
-      <div className="flex flex-col gap-3 sm:flex-row">
-        {options.map((option) => (
-          <ConceptCard
-            key={option.id}
-            option={option}
-            selected={selectedId === option.id}
-            revealed={revealed}
-            onSelect={onSelect}
-          />
-        ))}
-      </div>
-    </div>
+    <section
+      aria-label="On screen"
+      className="visual-stage animate-fade-in-up"
+    >
+      <div className="visual-stage-heading"><p className="participant-eyebrow">{action.type === "bar_chart" ? "A LITTLE CONTEXT" : "LET’S EXPLORE"}</p><span>{action.type === "bar_chart" ? "For discussion" : response ? "Answer confirmed" : "Your perspective"}</span></div>
+      <h2 className="visual-prompt">{action.prompt}</h2>
+      {action.type !== "bar_chart" && !response && <p className="visual-hint">Take your time. You can change your answer before confirming.</p>}
+      {action.type === "comparison_cards" && (
+        <ComparisonCards action={action} response={response} busy={busy} onRespond={onRespond} />
+      )}
+      {action.type === "bar_chart" && <BarChart action={action} />}
+      {action.type === "slider" && <Slider action={action} response={response} busy={busy} onRespond={onRespond} />}
+      {action.type === "multiple_choice" && (
+        <MultipleChoice action={action} response={response} busy={busy} onRespond={onRespond} />
+      )}
+      {response && (
+        <p role="status" className="visual-confirmation">
+          <span aria-hidden="true">✓</span> {preview ? "Confirmed in this preview only. Nothing was sent." : "Answer shared. Continue the conversation with Qalvi."}
+        </p>
+      )}
+    </section>
   );
 }
