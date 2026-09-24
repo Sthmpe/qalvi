@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 has not started.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -137,7 +137,17 @@ Stage 1 delivered:
 
 Stage 2A delivered: researcher sign-in/sign-out, verified claims, researcher-route session refresh and protection, workspace lookup and first-workspace bootstrap, a public participant route boundary, and linked-project generated TypeScript types. The researcher pages still use sample study data. The Qalvi project has all three migrations applied; linked database lint and anonymous access checks passed. Live sign-in, session refresh, protected navigation, sign-out, repeat sign-in, and single-workspace bootstrap passed acceptance with a real researcher account.
 
-Stage 2B (not started): persisting live interviews and reading real study/evidence data in the researcher workspace.
+Stage 2B.1 (database foundation): the migration and security tests are implemented.
+It adds single-use, seven-day invitation metadata, separate hashed resume capabilities
+limited to 24 hours, explicit consent version/time, writer fencing, ordered idempotent
+message append, lifecycle transitions, and issued/rendered visual evidence. The linked
+dry-run listed only `20260924000100_live_interview_foundation.sql`; it was then
+applied to the linked Qalvi project. Linked migration history, schema lint,
+anonymous-access denials, and regenerated TypeScript types were verified.
+
+Stage 2B.2 and later (not started): participant/server APIs, real LiveKit token
+issuance, agent evidence writing, browser recovery, and real researcher evidence reads.
+The demo and researcher fixtures remain unchanged; no real interview is saved yet.
 
 Store:
 - studies

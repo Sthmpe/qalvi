@@ -301,8 +301,10 @@ conversation restoration. Agent changes require deployment and live verification
 Stage 1 adds the database and its rules. Its three migrations are applied to the
 linked Qalvi project (`ohcykqteunevdkqijxdm`). Stage 2A connects researcher
 authentication and workspace bootstrap. Research pages still show local study
-fixtures, and the live interview is still session-local. Stage 2B persistence
-has not started.
+fixtures, and the live interview is still session-local. Stage 2B.1 is the
+database-only persistence foundation. Its migration is applied to the linked
+Qalvi project and database types are regenerated. No live interview writes to
+the database yet.
 
 ### Schema
 
@@ -315,6 +317,7 @@ and Supabase's default grants revoked, so a partial rollout exposes nothing.
 | `20260923000100_evidence_schema.sql` | Tables, keys, constraints, indexes, RLS enabled, grants revoked |
 | `20260923000200_evidence_integrity.sql` | Immutability, visual-answer validation, supporting-evidence rule, `updated_at`, profile creation |
 | `20260923000300_access_policies.sql` | Membership helpers, column grants, policies, `create_workspace`, `create_finding` |
+| `20260924000100_live_interview_foundation.sql` | Hashed invitation/resume capabilities, consent and lifecycle, writer fencing, ordered idempotent append RPCs, issued/rendered visual provenance |
 
 ```
 auth.users 1-1 profiles
@@ -338,7 +341,7 @@ contact columns. They are not auth users and never sign in. The same person in
 two studies is two unlinked participants.
 
 JSONB is used in three places only, each because the shape genuinely varies:
-`visual_displays.definition` (the display action exactly as rendered, whose
+`visual_displays.definition` (the display action exactly as issued, whose
 fields differ per visual type), `conversations.interviewer_metadata` (provider
 and model provenance), and `findings.ai_metadata`. Anything searched on is a
 relational column, and a check keeps `visual_displays` columns equal to their
@@ -355,11 +358,47 @@ slider value do not match what was shown. Findings cite the message, which
 reaches the structured value in one join, so every kind of evidence is cited
 the same way.
 
+### Stage 2B.1 database boundary
+
+`interview_invitations` holds a hash of a seven-day, single-use study invitation;
+`interview_resumes` holds a different hash for a capability valid for at most 24
+hours. Neither table grants access to `anon` or `authenticated`. Claiming is a
+service-role-only transaction that derives workspace and study from the saved
+invitation, creates a pseudonymous participant and pending conversation, records
+the explicit consent time/version, and stores the resume hash. A GET request
+must never claim an invitation; the future server action will require an
+intentional consent submission. No plaintext bearer token or audio is stored.
+
+`conversations.writer_generation` fences replaced agents. A new trusted writer
+claims a higher generation; append and lifecycle RPCs reject stale generations.
+`next_message_sequence` is allocated under the conversation row lock in the
+same transaction as an immutable message insert. Every message has a non-null,
+stable `transport_segment_id`. Retrying a committed event returns its original
+message ID and sequence only when the payload matches; a conflicting reuse
+fails. This is idempotent at-least-once processing, not exactly-once delivery.
+Researchers retain read-only access to raw evidence under the existing RLS;
+their clients and anonymous clients cannot execute these privileged RPCs or
+insert raw evidence.
+
+`visual_displays.issued_at` records when the trusted engine committed the
+action; nullable `rendered_at` is a separate one-time client render receipt.
+The display definition remains immutable. A structured visual response requires
+a rendered display and atomically creates both the participant `visual` message
+and linked response. Finding links continue to target that stable message ID.
+
+The installed LiveKit Agents SDK awaits `on_user_turn_completed` before it
+schedules speech, but its default preemptive generation can start the LLM
+earlier (`agent/.venv/Lib/site-packages/livekit/agents/voice/agent_activity.py`,
+`turn.py`). Stage 2B.3 must disable or gate preemptive generation for real
+persisted sessions before claiming that database commit precedes LLM generation.
+This finding is documentation only; the agent has not been changed.
+
 ### Integrity rules
 
 These are triggers and constraints, so they bind the service role too:
 
-- `messages`, `visual_displays`, and `visual_responses` cannot be updated. A
+- `messages` and `visual_responses` cannot be updated. `visual_displays` can
+  receive one `rendered_at` receipt; its issued definition cannot change. A
   correction is new evidence. Only final transcript segments are persisted.
 - `(conversation_id, transport_segment_id)` is unique, so a retried write cannot
   duplicate evidence.
@@ -414,12 +453,15 @@ reading JWT claims, and Supabase's default grants. It then exercises the schema
 as each role. PGlite runs Postgres 18 while `supabase/config.toml` targets 17,
 so the migrations avoid version-specific features. No Docker or hosted project
 is needed for the tests. On the linked project, migration history records all
-three versions, a second push dry-run reports no pending migrations, and
-`supabase db lint --linked` reports no schema errors. Linked catalog checks
-confirm RLS on all eleven tables, authenticated policies, immutable-evidence
-and finding-support triggers, composite tenancy foreign keys, and 41 indexes.
-The public Data API rejects anonymous reads on all eleven tables with
-permission error `42501`. Security Advisor reports one expected warning:
+four versions, including the Stage 2B.1 migration, and
+`supabase db lint --linked` reports no schema errors. Stage 2A linked catalog
+checks confirmed RLS on its eleven tables, authenticated policies,
+immutable-evidence and finding-support triggers, composite tenancy foreign
+keys, and 41 indexes. Stage 2B.1 adds two RLS-enabled capability tables and
+service-role-only interview functions. The public Data API rejects anonymous
+access to the new capability tables, raw messages, visual displays, and
+privileged interview functions with permission error `42501`.
+Security Advisor previously reported one expected Stage 2A warning:
 `public.create_workspace` is a `SECURITY DEFINER` function executable by
 `authenticated`, which is required to create a researcher's first workspace;
 `anon` cannot execute it, and the function checks `auth.uid()` before inserting.

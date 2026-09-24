@@ -336,3 +336,34 @@ localhost:3000 referer, expected anonymous
 permission denials from earlier security checks, and one malformed read-only
 diagnostic query; none occurred in the successful browser run. Stage 2A is
 complete. Stage 2B has not started.
+
+## 2026-09-24 — M4 Stage 2B.1 database foundation
+
+The approved Stage 2B.1 scope is database primitives and security tests only.
+Extend the Stage 1 evidence schema rather than create a second transcript model.
+Invitation and resume bearer tokens are separate opaque capabilities; only
+SHA-256-sized hashes are stored. Invitations are single-use and expire within
+seven days. Resume capabilities expire within 24 hours. Claiming will require
+an intentional server-side action after explicit transcript-storage consent;
+participants remain outside researcher Auth. No audio is persisted by default.
+
+Trusted `service_role` RPCs derive tenancy from saved invitation/conversation
+records, require an active writer generation, and allocate message sequence
+under a row lock. Repeated event keys return the original immutable message
+only for an identical payload. Raw-message insert/update grants for researcher
+and anonymous clients remain denied. Visual actions are recorded as issued
+before transport, with a distinct one-time rendered acknowledgement; visual
+answers write a message and structured response atomically.
+
+The migration and expanded PGlite/RLS tests pass locally. The linked dry-run
+listed only `20260924000100_live_interview_foundation.sql`; it was applied to
+Qalvi after explicit approval. Linked migration history, database lint, and
+anonymous Data API denials passed, and public-schema TypeScript types were
+regenerated. No API, agent, browser, or researcher UI integration is part of
+this stage.
+
+Installed LiveKit Agents code shows that `on_user_turn_completed` is awaited
+before speech scheduling, but default preemptive generation can begin LLM work
+before the callback returns. Stage 2B.3 must explicitly gate that path before
+using the callback as a persist-before-generation boundary. No agent behavior
+has been modified in Stage 2B.1.

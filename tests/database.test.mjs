@@ -3,7 +3,7 @@
 // each Supabase role would meet them.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { before, describe, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
@@ -41,6 +41,7 @@ const SUPABASE = `
 const TABLES = [
   "profiles", "workspaces", "workspace_members", "studies", "participants", "conversations",
   "messages", "visual_displays", "visual_responses", "findings", "finding_evidence",
+  "interview_invitations", "interview_resumes",
 ];
 
 const users = {
@@ -73,12 +74,13 @@ async function conversationIn(workspace, study, alias) {
     "insert into participants (workspace_id, study_id, alias) values ($1, $2, $3) returning id",
     [workspace, study, alias]);
   return (await one(
-    `insert into conversations (workspace_id, study_id, participant_id, livekit_room)
-     values ($1, $2, $3, $4) returning id`,
+    `insert into conversations (workspace_id, study_id, participant_id, livekit_room,
+                                status, consented_at, consent_version)
+     values ($1, $2, $3, $4, 'in_progress', now(), 'test-v1') returning id`,
     [workspace, study, participant.id, `qalvi-demo-${randomUUID()}`])).id;
 }
 
-async function message(conversation, sequence, speaker, channel, content, segment = null) {
+async function message(conversation, sequence, speaker, channel, content, segment = `test:${randomUUID()}`) {
   const scope = await one("select workspace_id, study_id from conversations where id = $1", [conversation]);
   return (await one(
     `insert into messages (workspace_id, study_id, conversation_id, sequence, speaker, channel,
@@ -104,8 +106,8 @@ async function display(conversation, action) {
   const scope = await one("select workspace_id, study_id from conversations where id = $1", [conversation]);
   return (await one(
     `insert into visual_displays (workspace_id, study_id, conversation_id, action_id, visual_type,
-                                  prompt, definition, shown_at)
-     values ($1, $2, $3, $4, $5, $6, $7, now()) returning id`,
+                                  prompt, definition, issued_at, rendered_at)
+     values ($1, $2, $3, $4, $5, $6, $7, now(), now()) returning id`,
     [scope.workspace_id, scope.study_id, conversation, action.id, action.type, action.prompt,
      JSON.stringify(action)])).id;
 }
@@ -140,6 +142,7 @@ before(async () => {
     "insert into studies (workspace_id, title) values ($1, 'Focused work') returning id", [ids.alpha])).id);
   ids.betaStudy = await researcher("carol", async () => (await one(
     "insert into studies (workspace_id, title) values ($1, 'Pricing') returning id", [ids.beta])).id);
+  await researcher("alice", () => db.query("update studies set status = 'active' where id = $1", [ids.alphaStudy]));
 
   await pipeline(async () => {
     ids.conversation = await conversationIn(ids.alpha, ids.alphaStudy, "Participant 01");
@@ -221,8 +224,8 @@ describe("access", () => {
   test("researchers can never write raw evidence", async () => {
     await researcher("alice", async () => {
       await assert.rejects(db.query(
-        `insert into messages (workspace_id, study_id, conversation_id, sequence, speaker, channel, content, occurred_at)
-         values ($1, $2, $3, 9, 'participant', 'text', 'invented', now())`,
+        `insert into messages (workspace_id, study_id, conversation_id, sequence, speaker, channel, content, occurred_at, transport_segment_id)
+         values ($1, $2, $3, 9, 'participant', 'text', 'invented', now(), 'forged:1')`,
         [ids.alpha, ids.alphaStudy, ids.conversation]), /permission denied/);
       await assert.rejects(db.query("update messages set content = 'edited' where id = $1", [ids.spoken]),
         /permission denied/);
@@ -283,8 +286,8 @@ describe("raw evidence integrity", () => {
 
   test("evidence can only attach to a conversation in its own study and workspace", async () => {
     await assert.rejects(pipeline(() => db.query(
-      `insert into messages (workspace_id, study_id, conversation_id, sequence, speaker, channel, content, occurred_at)
-       values ($1, $2, $3, 50, 'participant', 'text', 'misfiled', now())`,
+      `insert into messages (workspace_id, study_id, conversation_id, sequence, speaker, channel, content, occurred_at, transport_segment_id)
+       values ($1, $2, $3, 50, 'participant', 'text', 'misfiled', now(), 'test:misfiled')`,
       [ids.alpha, ids.alphaStudy, ids.betaConversation])), /foreign key/);
   });
 
@@ -314,7 +317,7 @@ describe("raw evidence integrity", () => {
         /check constraint/);
       // The searchable columns can never disagree with the snapshot of what was shown.
       await assert.rejects(db.query(
-        `insert into visual_displays (workspace_id, study_id, conversation_id, action_id, visual_type, prompt, definition, shown_at)
+        `insert into visual_displays (workspace_id, study_id, conversation_id, action_id, visual_type, prompt, definition, issued_at)
          values ($1, $2, $3, 'demo-cards-3', 'bar_chart', $4, $5, now())`,
         [ids.alpha, ids.alphaStudy, ids.conversation, CARDS.prompt, JSON.stringify({ ...CARDS, id: "demo-cards-3" })]),
         /check constraint/);
@@ -326,6 +329,218 @@ describe("raw evidence integrity", () => {
       "select id from messages where study_id = $1 and speaker = 'participant' and content_search @@ plainto_tsquery('simple', 'client')",
       [ids.alphaStudy]));
     assert.deepEqual(found.map((row) => row.id), [ids.spoken]);
+  });
+});
+
+describe("live interview persistence foundation", () => {
+  const hash = () => randomBytes(32).toString("hex");
+  const now = () => new Date().toISOString();
+  const append = (conversation, generation, eventKey, content, occurredAt, speaker = "participant", channel = "text") =>
+    one(`select * from public.append_interview_message($1,$2,$3,$4,$5,$6,$7)` ,
+      [conversation, generation, eventKey, speaker, channel, content, occurredAt]);
+  const issueInvitation = async (study = ids.alphaStudy, workspace = ids.alpha, issuer = users.alice) => {
+    const token = hash();
+    const id = await pipeline(async () => (await one(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash)
+       values ($1,$2,$3,$4) returning id`, [workspace, study, issuer, token])).id);
+    return { id, token };
+  };
+  const claim = async (token, resume = hash(), room = `qalvi-real-${randomUUID()}`) =>
+    pipeline(async () => (await one(
+      "select public.claim_interview_invitation($1,$2,$3,'consent-v1') as id",
+      [token, resume, room])).id);
+
+  test("privileged RPCs have a safe search path and only service_role execution", async () => {
+    const names = ["claim_interview_invitation", "resolve_interview_resume", "claim_conversation_writer",
+      "transition_interview_conversation", "append_interview_message", "issue_interview_visual",
+      "acknowledge_interview_visual", "append_interview_visual_response"];
+    for (const name of names) {
+      const routine = await one(
+        `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public' and p.proname = $1`, [name]);
+      assert.equal(routine.prosecdef, true, name);
+      assert.ok(routine.proconfig.some((setting) => setting.startsWith("search_path=")), name);
+      const permissions = await one(
+        `select has_function_privilege('anon', $1::regprocedure, 'EXECUTE') as anon,
+                has_function_privilege('authenticated', $1::regprocedure, 'EXECUTE') as researcher,
+                has_function_privilege('service_role', $1::regprocedure, 'EXECUTE') as service`,
+        [routine.signature]);
+      assert.deepEqual(permissions, { anon: false, researcher: false, service: true }, name);
+    }
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.claim_conversation_writer($1, 'x')", [ids.conversation])), /permission denied/);
+    await assert.rejects(as("anon", null, () => db.query(
+      "select public.resolve_interview_resume($1)", [hash()])), /permission denied/);
+  });
+
+  test("invitation scope, issuer membership, expiry, and single use are enforced", async () => {
+    await assert.rejects(pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash)
+       values ($1,$2,$3,$4)`, [ids.beta, ids.alphaStudy, users.carol, hash()])), /foreign key/);
+    await assert.rejects(pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash)
+       values ($1,$2,$3,$4)`, [ids.alpha, ids.alphaStudy, users.carol, hash()])), /issuer must belong/);
+    await assert.rejects(pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash, expires_at)
+       values ($1,$2,$3,$4, now() + interval '8 days')`,
+      [ids.alpha, ids.alphaStudy, users.alice, hash()])), /check constraint/);
+    const { id, token } = await issueInvitation();
+    await assert.rejects(pipeline(() => db.query(
+      "update interview_invitations set study_id = $1 where id = $2", [ids.betaStudy, id])), /cannot be rewritten/);
+    const conversation = await claim(token);
+    assert.equal((await one("select status, consent_version from conversations where id = $1", [conversation])).status, "pending");
+    assert.equal((await one("select consent_version from conversations where id = $1", [conversation])).consent_version, "consent-v1");
+    await assert.rejects(claim(token), /invitation is unavailable/);
+    const saved = await one("select count(*)::int as n from conversations where id = $1", [conversation]);
+    assert.equal(saved.n, 1);
+    const revoked = await issueInvitation();
+    await pipeline(() => db.query("update interview_invitations set revoked_at = now() where id = $1", [revoked.id]));
+    await assert.rejects(claim(revoked.token), /invitation is unavailable/);
+    const expired = await issueInvitation();
+    await pipeline(() => db.query(
+      "update interview_invitations set revoked_at = now() where id = $1", [expired.id]));
+    const pastHash = hash();
+    await pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash, created_at, expires_at)
+       values ($1,$2,$3,$4, now() - interval '8 days', now() - interval '1 day')`,
+      [ids.alpha, ids.alphaStudy, users.alice, pastHash]));
+    await assert.rejects(claim(pastHash), /invitation is unavailable/);
+  });
+
+  test("resume hashes are unique, limited to 24 hours, and revocable", async () => {
+    const invite = await issueInvitation();
+    const resume = hash();
+    const conversation = await claim(invite.token, resume);
+    assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id,
+      conversation);
+    await assert.rejects(pipeline(() => db.query(
+      "insert into interview_resumes(conversation_id, token_hash) values ($1,$2)",
+      [conversation, resume])), /duplicate key/);
+    await assert.rejects(pipeline(() => db.query(
+      `insert into interview_resumes(conversation_id, token_hash, expires_at)
+       values ($1,$2,now() + interval '25 hours')`, [conversation, hash()])), /check constraint/);
+    await pipeline(() => db.query(
+      "update interview_resumes set revoked_at = now() where token_hash = $1", [resume]));
+    assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id, null);
+    await pipeline(() => db.query(
+      "insert into interview_resumes(conversation_id, token_hash) values ($1,$2)", [conversation, hash()]));
+  });
+
+  test("writer generations fence replacements; ordered append retries do not duplicate evidence", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const firstWriter = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const at = now();
+    const first = await pipeline(() => append(conversation, firstWriter, "chat:one", "First answer", at));
+    const replay = await pipeline(() => append(conversation, firstWriter, "chat:one", "First answer", at));
+    assert.deepEqual(replay, { ...first, inserted: false });
+    await assert.rejects(pipeline(() => append(conversation, firstWriter, "chat:one", "Different answer", at)),
+      /conflicting payload/);
+    const secondWriter = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    assert.equal(secondWriter, firstWriter + 1);
+    await assert.rejects(pipeline(() => append(conversation, firstWriter, "chat:two", "Stale", now())),
+      /not writable by this generation/);
+    const results = await pipeline(async () => [
+      await append(conversation, secondWriter, "voice:two", "Second answer", now(), "participant", "voice"),
+      await append(conversation, secondWriter, "agent:three", "Follow-up", now(), "interviewer", "text"),
+    ]);
+    assert.deepEqual([first, ...results].map((item) => item.message_sequence), [0, 1, 2]);
+    assert.deepEqual((await rows("select sequence, content from messages where conversation_id = $1 order by sequence", [conversation]))
+      .map((row) => row.content), ["First answer", "Second answer", "Follow-up"]);
+    await assert.rejects(pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,$2,'completed')", [conversation, firstWriter])),
+      /stale conversation writer/);
+    await pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,$2,'completed')", [conversation, secondWriter]));
+    const finalTime = (await one(
+      "select occurred_at from messages where conversation_id = $1 and transport_segment_id = 'agent:three'",
+      [conversation])).occurred_at;
+    const terminalReplay = await pipeline(() => append(conversation, secondWriter, "agent:three",
+      "Follow-up", finalTime, "interviewer", "text"));
+    assert.equal(terminalReplay.inserted, false);
+    await assert.rejects(pipeline(() => append(conversation, secondWriter, "agent:four", "Too late", now(), "interviewer")),
+      /not writable by this generation/);
+  });
+
+  test("lifecycle transitions require consent and reject impossible resumptions", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    await assert.rejects(pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,0,'completed')", [conversation])),
+      /invalid conversation status transition/);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    await pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,$2,'interrupted')", [conversation, generation]));
+    assert.equal((await one("select status from conversations where id = $1", [conversation])).status, "interrupted");
+    const resumed = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    await pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,$2,'completed')", [conversation, resumed]));
+    await assert.rejects(pipeline(() => db.query(
+      "select public.claim_conversation_writer($1,$2)", [conversation, room])), /cannot accept a writer/);
+    await assert.rejects(pipeline(() => db.query(
+      "update conversations set status = 'pending' where id = $1", [conversation])), /invalid conversation status transition/);
+    await assert.rejects(pipeline(() => db.query(
+      "update conversations set consent_version = 'changed' where id = $1", [conversation])), /consent is immutable/);
+    assert.equal((await one("select ended_at is not null as ended from conversations where id = $1", [conversation])).ended, true);
+  });
+
+  test("visual issue, render receipt and answer are distinct atomic evidence steps", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const displayId = (await pipeline(() => one(
+      "select public.issue_interview_visual($1,$2,$3::jsonb) as id",
+      [conversation, generation, JSON.stringify(CARDS)]))).id;
+    assert.equal((await one("select rendered_at from visual_displays where id = $1", [displayId])).rendered_at, null);
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
+      [conversation, generation, "visual:one", CARDS.id, "Chose mixed", now(), ["mixed"], null])),
+      /not rendered/);
+    assert.equal((await one("select count(*)::int as n from messages where conversation_id = $1", [conversation])).n, 0);
+    await pipeline(() => db.query("select public.acknowledge_interview_visual($1,$2,$3)",
+      [conversation, generation, CARDS.id]));
+    const issued = await one("select issued_at, rendered_at from visual_displays where id = $1", [displayId]);
+    assert.ok(issued.rendered_at >= issued.issued_at);
+    const at = now();
+    const saved = await pipeline(() => one(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
+      [conversation, generation, "visual:one", CARDS.id, "Chose mixed", at, ["mixed"], null]));
+    const replay = await pipeline(() => one(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
+      [conversation, generation, "visual:one", CARDS.id, "Chose mixed", at, ["mixed"], null]));
+    assert.equal(saved.message_sequence, 0);
+    assert.deepEqual(replay, { ...saved, inserted: false });
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
+      [conversation, generation, "visual:one", CARDS.id, "Chose mixed", at, ["planned"], null])),
+      /conflicting visual answer/);
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_message($1,$2,$3,'participant','visual',$4,$5)",
+      [conversation, generation, "visual:bypass", "Forged", now()])), /atomic visual-response/);
+    const answer = await one("select message_id, selected_option_ids from visual_responses where display_id = $1", [displayId]);
+    assert.equal(answer.message_id, saved.message_id);
+    assert.deepEqual(answer.selected_option_ids, ["mixed"]);
+    await assert.rejects(pipeline(() => db.query(
+      "update visual_displays set prompt = 'rewritten' where id = $1", [displayId])), /immutable/);
+    const wrongStudy = await issueInvitation(ids.betaStudy, ids.beta, users.carol);
+    await pipeline(() => db.query("update studies set status = 'active' where id = $1", [ids.betaStudy]));
+    const otherConversation = await claim(wrongStudy.token);
+    const otherRoom = (await one("select livekit_room from conversations where id = $1", [otherConversation])).livekit_room;
+    const otherGeneration = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [otherConversation, otherRoom]))).n;
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
+      [otherConversation, otherGeneration, "visual:foreign", CARDS.id, "Chose mixed", now(), ["mixed"], null])),
+      /not rendered/);
   });
 });
 

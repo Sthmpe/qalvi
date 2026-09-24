@@ -1,4 +1,4 @@
-﻿export type Json =
+export type Json =
   | string
   | number
   | boolean
@@ -16,43 +16,58 @@ export type Database = {
     Tables: {
       conversations: {
         Row: {
+          consent_version: string | null
+          consented_at: string | null
           created_at: string
           ended_at: string | null
           id: string
+          interrupted_at: string | null
           interviewer_metadata: Json
           livekit_room: string | null
+          next_message_sequence: number
           participant_id: string
           started_at: string
           status: string
           study_id: string
           updated_at: string
           workspace_id: string
+          writer_generation: number
         }
         Insert: {
+          consent_version?: string | null
+          consented_at?: string | null
           created_at?: string
           ended_at?: string | null
           id?: string
+          interrupted_at?: string | null
           interviewer_metadata?: Json
           livekit_room?: string | null
+          next_message_sequence?: number
           participant_id: string
           started_at?: string
           status?: string
           study_id: string
           updated_at?: string
           workspace_id: string
+          writer_generation?: number
         }
         Update: {
+          consent_version?: string | null
+          consented_at?: string | null
           created_at?: string
           ended_at?: string | null
           id?: string
+          interrupted_at?: string | null
           interviewer_metadata?: Json
           livekit_room?: string | null
+          next_message_sequence?: number
           participant_id?: string
           started_at?: string
           status?: string
           study_id?: string
           updated_at?: string
           workspace_id?: string
+          writer_generation?: number
         }
         Relationships: [
           {
@@ -179,6 +194,102 @@ export type Database = {
           },
         ]
       }
+      interview_invitations: {
+        Row: {
+          claimed_at: string | null
+          conversation_id: string | null
+          created_at: string
+          expires_at: string
+          id: string
+          issued_by: string
+          revoked_at: string | null
+          study_id: string
+          token_hash: string
+          workspace_id: string
+        }
+        Insert: {
+          claimed_at?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          expires_at?: string
+          id?: string
+          issued_by: string
+          revoked_at?: string | null
+          study_id: string
+          token_hash: string
+          workspace_id: string
+        }
+        Update: {
+          claimed_at?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          expires_at?: string
+          id?: string
+          issued_by?: string
+          revoked_at?: string | null
+          study_id?: string
+          token_hash?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interview_invitations_conversation_id_study_id_workspace_i_fkey"
+            columns: ["conversation_id", "study_id", "workspace_id"]
+            isOneToOne: false
+            referencedRelation: "conversations"
+            referencedColumns: ["id", "study_id", "workspace_id"]
+          },
+          {
+            foreignKeyName: "interview_invitations_issued_by_fkey"
+            columns: ["issued_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "interview_invitations_study_id_workspace_id_fkey"
+            columns: ["study_id", "workspace_id"]
+            isOneToOne: false
+            referencedRelation: "studies"
+            referencedColumns: ["id", "workspace_id"]
+          },
+        ]
+      }
+      interview_resumes: {
+        Row: {
+          conversation_id: string
+          created_at: string
+          expires_at: string
+          id: string
+          revoked_at: string | null
+          token_hash: string
+        }
+        Insert: {
+          conversation_id: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          revoked_at?: string | null
+          token_hash: string
+        }
+        Update: {
+          conversation_id?: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          revoked_at?: string | null
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interview_resumes_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "conversations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       messages: {
         Row: {
           channel: string
@@ -187,11 +298,12 @@ export type Database = {
           conversation_id: string
           created_at: string
           id: string
+          interrupted: boolean
           occurred_at: string
           sequence: number
           speaker: string
           study_id: string
-          transport_segment_id: string | null
+          transport_segment_id: string
           workspace_id: string
         }
         Insert: {
@@ -201,11 +313,12 @@ export type Database = {
           conversation_id: string
           created_at?: string
           id?: string
+          interrupted?: boolean
           occurred_at: string
           sequence: number
           speaker: string
           study_id: string
-          transport_segment_id?: string | null
+          transport_segment_id: string
           workspace_id: string
         }
         Update: {
@@ -215,11 +328,12 @@ export type Database = {
           conversation_id?: string
           created_at?: string
           id?: string
+          interrupted?: boolean
           occurred_at?: string
           sequence?: number
           speaker?: string
           study_id?: string
-          transport_segment_id?: string | null
+          transport_segment_id?: string
           workspace_id?: string
         }
         Relationships: [
@@ -355,8 +469,9 @@ export type Database = {
           created_at: string
           definition: Json
           id: string
+          issued_at: string
           prompt: string
-          shown_at: string
+          rendered_at: string | null
           study_id: string
           visual_type: string
           workspace_id: string
@@ -367,8 +482,9 @@ export type Database = {
           created_at?: string
           definition: Json
           id?: string
+          issued_at: string
           prompt: string
-          shown_at: string
+          rendered_at?: string | null
           study_id: string
           visual_type: string
           workspace_id: string
@@ -379,8 +495,9 @@ export type Database = {
           created_at?: string
           definition?: Json
           id?: string
+          issued_at?: string
           prompt?: string
-          shown_at?: string
+          rendered_at?: string | null
           study_id?: string
           visual_type?: string
           workspace_id?: string
@@ -532,6 +649,61 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      acknowledge_interview_visual: {
+        Args: {
+          p_action_id: string
+          p_conversation_id: string
+          p_writer_generation: number
+        }
+        Returns: string
+      }
+      append_interview_message: {
+        Args: {
+          p_channel: string
+          p_content: string
+          p_conversation_id: string
+          p_event_key: string
+          p_interrupted?: boolean
+          p_occurred_at: string
+          p_speaker: string
+          p_writer_generation: number
+        }
+        Returns: {
+          inserted: boolean
+          message_id: string
+          message_sequence: number
+        }[]
+      }
+      append_interview_visual_response: {
+        Args: {
+          p_action_id: string
+          p_content: string
+          p_conversation_id: string
+          p_event_key: string
+          p_numeric_value?: number
+          p_occurred_at: string
+          p_selected_option_ids?: string[]
+          p_writer_generation: number
+        }
+        Returns: {
+          inserted: boolean
+          message_id: string
+          message_sequence: number
+        }[]
+      }
+      claim_conversation_writer: {
+        Args: { p_conversation_id: string; p_livekit_room: string }
+        Returns: number
+      }
+      claim_interview_invitation: {
+        Args: {
+          p_consent_version: string
+          p_invitation_hash: string
+          p_livekit_room: string
+          p_resume_hash: string
+        }
+        Returns: string
+      }
       create_finding: {
         Args: {
           finding_category: string
@@ -543,6 +715,26 @@ export type Database = {
         Returns: string
       }
       create_workspace: { Args: { workspace_name: string }; Returns: string }
+      issue_interview_visual: {
+        Args: {
+          p_conversation_id: string
+          p_definition: Json
+          p_writer_generation: number
+        }
+        Returns: string
+      }
+      resolve_interview_resume: {
+        Args: { p_resume_hash: string }
+        Returns: string
+      }
+      transition_interview_conversation: {
+        Args: {
+          p_conversation_id: string
+          p_next_status: string
+          p_writer_generation: number
+        }
+        Returns: string
+      }
     }
     Enums: {
       [_ in never]: never
