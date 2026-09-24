@@ -84,7 +84,7 @@ Validation: `npx tsc --noEmit`, `npm run lint`, and `npm run build` passed, alon
 
 ## Milestone 3 — Interactive Visuals
 
-Status: Implemented; final live acceptance pending — 2026-09-22. Adaptive conversational control added after the first live test; changes uncommitted.
+Status: Complete — 2026-09-23. Live acceptance passed after the adaptive conversational control, active-visual lifecycle, and plain-speech fixes below.
 
 Goal:
 AI can display interactive research material during interview.
@@ -115,10 +115,7 @@ Delivered:
 Final acceptance pass: TypeScript, lint, production build, and Node regression tests passed.
 Both participant pages passed browser checks at 320, 390, 768, and 1440px, including
 editable draft answers and gallery-only confirmations. The first live room connected and
-the AI answered typed input, but no visual appeared, and the agent followed its planned sequence rather than the participant; the conductor above replaces that behaviour and awaits its own live test. LiveKit Cloud still runs the
-September 20 M2 deployment. The user requested that deployment remain unchanged.
-Natural visual delivery, live visual-answer follow-up, and fresh end-to-end voice
-acceptance therefore remain unverified. Do not mark M3 complete or start M4 yet.
+the AI answered typed input, but no visual appeared, and the agent followed its planned sequence rather than the participant. The conductor above replaced that behaviour, and later live runs drove the visual-lifecycle, duplicate-question, TTS fallback, and plain-speech fixes. Live acceptance passed on 2026-09-23.
 
 Excluded: LLM-chosen or LLM-authored display actions, study-specific visual configuration, persistence of interactions (Milestone 4), Recharts (not needed for these four), and any visual types beyond the four above.
 
@@ -126,6 +123,21 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 
 Goal:
 Studies and interviews survive reloads.
+
+Status: Stage 1 migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24.
+
+Stage 1 delivered:
+- Supabase project directory with `config.toml` and three fail-closed migrations
+- profiles, workspaces, membership, studies, pseudonymous participants, conversations, immutable messages, visual displays and responses, findings, and finding evidence links
+- composite-key tenancy, row level security on every table, column grants, no anonymous access
+- integrity triggers binding every role: immutable evidence, visual answers validated against what was shown, findings that must cite supporting evidence, cited messages that cannot be deleted alone
+- `create_workspace` and `create_finding` for the operations that need one transaction
+- minimal browser, server, and server-only elevated Supabase clients
+- 25 database tests running the real migrations on in-process Postgres as each Supabase role
+
+Stage 2A delivered: researcher sign-in/sign-out, verified claims, researcher-route session refresh and protection, workspace lookup and first-workspace bootstrap, a public participant route boundary, and linked-project generated TypeScript types. The researcher pages still use sample study data. The Qalvi project has all three migrations applied; linked database lint and anonymous access checks passed. Live sign-in, session refresh, protected navigation, sign-out, repeat sign-in, and single-workspace bootstrap passed acceptance with a real researcher account.
+
+Stage 2B (not started): persisting live interviews and reading real study/evidence data in the researcher workspace.
 
 Store:
 - studies

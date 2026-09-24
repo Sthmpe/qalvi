@@ -9,7 +9,7 @@ Frontend and server:
 - Tailwind CSS
 
 Database/authentication/storage:
-- Supabase (planned; not connected in M2.5)
+- Supabase Auth and PostgreSQL (M4 Stage 2A: researcher authentication and workspace bootstrap wired; study and interview persistence deferred)
 
 Realtime voice:
 - LiveKit
@@ -98,7 +98,7 @@ All sensitive API keys remain server-side.
 Never expose:
 
 - GROQ_API_KEY
-- SUPABASE_SERVICE_ROLE_KEY
+- SUPABASE_SECRET_KEY
 - LIVEKIT_API_SECRET
 
 to the browser.
@@ -295,3 +295,132 @@ If a replacement agent job receives this marker, it reports
 `qalvi.session.status=unavailable` instead of greeting without the old context.
 Resumption requires the original agent session to survive; M3 has no durable
 conversation restoration. Agent changes require deployment and live verification.
+
+## M4 persistence foundation
+
+Stage 1 adds the database and its rules. Its three migrations are applied to the
+linked Qalvi project (`ohcykqteunevdkqijxdm`). Stage 2A connects researcher
+authentication and workspace bootstrap. Research pages still show local study
+fixtures, and the live interview is still session-local. Stage 2B persistence
+has not started.
+
+### Schema
+
+Migrations live in `supabase/migrations` and are applied in filename order.
+Each is fail-closed: the first creates every table with row level security on
+and Supabase's default grants revoked, so a partial rollout exposes nothing.
+
+| File | Contents |
+| --- | --- |
+| `20260923000100_evidence_schema.sql` | Tables, keys, constraints, indexes, RLS enabled, grants revoked |
+| `20260923000200_evidence_integrity.sql` | Immutability, visual-answer validation, supporting-evidence rule, `updated_at`, profile creation |
+| `20260923000300_access_policies.sql` | Membership helpers, column grants, policies, `create_workspace`, `create_finding` |
+
+```
+auth.users 1-1 profiles
+workspaces 1-* workspace_members *-1 profiles           (role: owner | member)
+workspaces 1-* studies
+  studies 1-* participants 1-* conversations
+    conversations 1-* messages                          raw evidence, immutable
+    conversations 1-* visual_displays                   what was shown, immutable
+      visual_displays 1-0..1 visual_responses 1-1 messages (channel = visual)
+  studies 1-* findings                                  derived, editable
+    findings *-* messages through finding_evidence      (supports | contradicts)
+```
+
+Every table below `studies` carries `workspace_id` and `study_id`, and each
+child references its parent through a composite key that includes both. A
+message cannot point at a conversation in another study, and a finding cannot
+cite a message from another study, whatever a policy says.
+
+Participants are pseudonymous: an `alias` and an optional `segment`, no name or
+contact columns. They are not auth users and never sign in. The same person in
+two studies is two unlinked participants.
+
+JSONB is used in three places only, each because the shape genuinely varies:
+`visual_displays.definition` (the display action exactly as rendered, whose
+fields differ per visual type), `conversations.interviewer_metadata` (provider
+and model provenance), and `findings.ai_metadata`. Anything searched on is a
+relational column, and a check keeps `visual_displays` columns equal to their
+snapshot.
+
+### Visual answers
+
+An on-screen answer is stored twice, deliberately. It is a participant
+`message` on the `visual` channel, so it keeps its place in the transcript and
+is what the interviewer heard. It is also a `visual_response` with the
+structured value (option ids or a number), linked to that message and to the
+`visual_display` it answered. A trigger rejects answers whose type, options, or
+slider value do not match what was shown. Findings cite the message, which
+reaches the structured value in one join, so every kind of evidence is cited
+the same way.
+
+### Integrity rules
+
+These are triggers and constraints, so they bind the service role too:
+
+- `messages`, `visual_displays`, and `visual_responses` cannot be updated. A
+  correction is new evidence. Only final transcript segments are persisted.
+- `(conversation_id, transport_segment_id)` is unique, so a retried write cannot
+  duplicate evidence.
+- A finding must cite at least one supporting message, checked at commit.
+  Removing or recasting the last supporting link is refused.
+- A cited message cannot be deleted on its own. Deleting a whole study still
+  works, because its findings and their links go in the same statement.
+
+### Access
+
+| Role | Can |
+| --- | --- |
+| `anon` | Nothing. Participants reach Qalvi through the interview server. |
+| `authenticated` | Read everything in their workspaces. Create and edit studies, participants, findings, and evidence links. Never write raw evidence, never delete studies or evidence. |
+| `service_role` | Everything RLS allows it to bypass, but not the integrity rules. Used only by trusted server code. |
+
+Policies call `private.is_workspace_member` and `private.is_workspace_owner`,
+security-definer helpers in a schema the Data API does not expose. Column grants
+keep ids, tenancy, authorship, and provenance out of reach: a researcher cannot
+move a study between workspaces or mark a finding as AI-derived. Membership
+changes are service-role only until team management is in scope.
+
+`create_workspace` creates a workspace with its caller as owner.
+`create_finding` writes a finding and its supporting links in one transaction,
+which the supporting-evidence rule requires.
+
+### Client utilities
+
+`src/lib/supabase/` holds `config.ts` (public URL and publishable key),
+`browser.ts` (Client Components), `server.ts` (Server Components and Actions
+using the researcher's cookie session), `proxy.ts` (session refresh), and
+`secret.ts` (server-only elevated access, unused until a trusted write path
+exists). The only environment names are `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SECRET_KEY`. Only the
+first two are needed for Stage 2A. Generated types live in
+`src/types/database.ts` and come from the linked project's public schema.
+
+`src/proxy.ts` covers researcher routes and `/sign-in`, refreshes cookies, and
+redirects signed-out visitors. The researcher layout repeats the verified
+`getClaims()` check and reads their workspace through RLS. `signIn` creates a
+first workspace after a successful login if needed; `WorkspaceSetup` offers an
+explicit fallback. Page renders never create workspaces. `signOut` clears the
+local session. Participant `/interview/*` routes do not use this proxy and
+remain public.
+
+### Validation
+
+`tests/database.test.mjs` applies the real migration files to Postgres running
+in process (PGlite), after recreating the Supabase pieces they depend on: the
+`anon`, `authenticated`, and `service_role` roles, `auth.users`, `auth.uid()`
+reading JWT claims, and Supabase's default grants. It then exercises the schema
+as each role. PGlite runs Postgres 18 while `supabase/config.toml` targets 17,
+so the migrations avoid version-specific features. No Docker or hosted project
+is needed for the tests. On the linked project, migration history records all
+three versions, a second push dry-run reports no pending migrations, and
+`supabase db lint --linked` reports no schema errors. Linked catalog checks
+confirm RLS on all eleven tables, authenticated policies, immutable-evidence
+and finding-support triggers, composite tenancy foreign keys, and 41 indexes.
+The public Data API rejects anonymous reads on all eleven tables with
+permission error `42501`. Security Advisor reports one expected warning:
+`public.create_workspace` is a `SECURITY DEFINER` function executable by
+`authenticated`, which is required to create a researcher's first workspace;
+`anon` cannot execute it, and the function checks `auth.uid()` before inserting.
+The CLI schema dump requires Docker, which is not installed here. Live Stage 2A acceptance passed with one real researcher account. First sign-in created one workspace and owner membership; refresh, protected navigation, sign-out, and repeat sign-in preserved the same workspace. Linked authenticated-role checks matched the intended read and write boundaries, while the two-tenant PGlite tests cover foreign-workspace isolation. No live interview evidence is persisted yet.

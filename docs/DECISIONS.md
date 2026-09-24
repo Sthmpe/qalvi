@@ -248,3 +248,91 @@ the evidence marker on the participant's own on-screen answers.
 Not done:
 No UI change, no provider change, no second orchestration layer, no dedupe of rendered
 text. The filter strips presentation syntax only and never rewrites what Qalvi said.
+
+## 2026-09-23 — M3 accepted; M4 Stage 1 persistence foundation
+
+M3 passed live acceptance and is complete. M4 has started.
+
+Decision:
+Supabase Auth and PostgreSQL, with the schema defined by migrations in
+`supabase/migrations`, never by dashboard edits. Stage 1 is the foundation
+only: schema, integrity rules, access policies, and minimal client utilities.
+The app is not yet wired to the database.
+
+Tenancy is structural. Every row below a study carries `workspace_id` and
+`study_id` and references its parent through a composite key containing both,
+so no row can point across a study or workspace even if a policy is wrong.
+
+Raw evidence is immutable for every role, including the service role:
+`messages`, `visual_displays`, and `visual_responses` reject updates by
+trigger. Researchers can read it but never write it; only trusted server code
+records evidence. Only final transcript segments are stored, and a unique
+transport segment id makes retried writes idempotent.
+
+On-screen answers are stored as both a participant message on the `visual`
+channel and a structured `visual_response` linked to that message and to the
+`visual_display` it answered. The message keeps the transcript whole and gives
+findings one uniform thing to cite; the response keeps the exact value
+queryable; the display records what was actually offered, which is the only way
+to interpret an answer later and the only record of a visual nobody answered.
+A trigger rejects an answer that does not match what was shown.
+
+Findings are derived and editable, but must always cite at least one supporting
+message, checked at commit. They may also cite counter-evidence. A cited
+message cannot be deleted on its own; a whole study can be.
+
+Participants are pseudonymous and never sign in: an alias, an optional segment,
+no contact details, no link across studies. `anon` has no access to anything;
+participant traffic will go through the interview server.
+
+JSONB only where the shape genuinely varies: the display snapshot, interviewer
+provenance, and AI finding metadata.
+
+Dependencies added: `@supabase/supabase-js` and `@supabase/ssr` (the Supabase
+clients), `server-only` (turns an accidental client import of the service-role
+client into a build error), and `@electric-sql/pglite` as a dev dependency so
+the migrations run against real Postgres in `npm test` without Docker.
+
+Not done:
+No app reads or writes, no authentication UI, no session-refresh proxy, no
+generated database types, no study objectives table, no AI findings pipeline,
+no team management, no participant contact storage.
+
+## 2026-09-24 — M4 Stage 2A researcher authentication
+
+The linked project is Qalvi (`ohcykqteunevdkqijxdm`). The three Stage 1
+migrations were reviewed, dry-run, and applied in order with stable Supabase CLI
+2.117.0, invoked through `npx` without adding a project dependency. Remote
+migration history matches all three files. Linked database lint reports no
+schema errors. Catalog checks confirm RLS, policies, triggers, composite keys,
+and indexes; anonymous Data API reads are denied on all eleven tables.
+Security Advisor reports the intentional `authenticated` execution grant on
+`public.create_workspace`, a `SECURITY DEFINER` function needed for first-owner
+bootstrap. Anonymous callers have no execute grant, and the function checks
+`auth.uid()`.
+
+Researcher authentication uses the project's publishable key, verified
+`auth.getClaims()`, server-side cookie clients, and a Next.js 16 route proxy for
+session refresh. The researcher layout verifies identity again. First-workspace
+creation runs after sign-in or an explicit setup action, never during a page
+render; later refreshes and sign-ins look up the existing workspace. Participant
+routes remain public. The secret-key client stays server-only and unused.
+
+`src/types/database.ts` is generated from the linked public schema. The local
+research pages still show sample studies and the participant interview still
+uses its existing session-local flow. Stage 2B persistence has not started.
+Live Stage 2A acceptance passed with a real researcher account on 2026-09-24.
+Before first sign-in, the linked project had one Auth user and profile but no
+workspace or membership. First sign-in created exactly one workspace and one
+owner membership. Browser testing confirmed protected navigation, session
+persistence across refresh, sign-out protection, and restoration of that same
+workspace on a later sign-in. A separate headless Chrome run repeated those
+steps and recorded no browser console errors. Linked authenticated-role checks
+showed access to the researcher's own workspace, rejected a nonmember
+workspace ID, and showed no direct insert grant for raw messages or
+membership. The 25 migration/RLS tests passed, including tests with two
+distinct tenants. Supabase logs showed one failed credential attempt with a
+localhost:3000 referer, expected anonymous
+permission denials from earlier security checks, and one malformed read-only
+diagnostic query; none occurred in the successful browser run. Stage 2A is
+complete. Stage 2B has not started.

@@ -2,8 +2,19 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { Navigation } from "./Navigation";
 import { QalviOrb } from "@/components/ui/primitives";
+import { signOut } from "@/lib/auth/actions";
 
-export default function ResearchShell({ children }: { children: ReactNode }) {
+type Account = { email: string | null; workspace: string | null };
+
+export default function ResearchShell({
+  children,
+  account,
+}: {
+  children: ReactNode;
+  account: Account;
+}) {
+  const workspace = account.workspace ?? "Research workspace";
+  const monogram = workspace.trim().charAt(0).toUpperCase() || "R";
   return (
     <div className="research-shell">
       <a className="q-skip" href="#main-content">
@@ -15,9 +26,10 @@ export default function ResearchShell({ children }: { children: ReactNode }) {
           Qalvi<span className="brand-dot">.</span>
         </Link>
         <div className="workspace-label">
-          <span className="workspace-monogram">R</span>
+          <span className="workspace-monogram">{monogram}</span>
           <div>
-            Research workspace<small>Room for better questions</small>
+            {workspace}
+            <small>{account.email ?? "Room for better questions"}</small>
           </div>
         </div>
         <p className="sidebar-label">WORKSPACE</p>
@@ -40,8 +52,8 @@ export default function ResearchShell({ children }: { children: ReactNode }) {
           </p>
         </div>
         <div className="sidebar-footer">
-          <span className="sample-dot" /> Sample workspace
-          <small>Illustrative data · nothing is stored</small>
+          <span className="sample-dot" /> Sample data
+          <small>Illustrative studies · nothing is stored yet</small>
         </div>
       </aside>
       <div className="research-body">
@@ -54,10 +66,15 @@ export default function ResearchShell({ children }: { children: ReactNode }) {
             Qalvi
           </Link>
           <div className="header-end">
-            <span className="header-preview">Sample workspace</span>
-            <span className="q-avatar" aria-label="Research workspace">
-              R
+            <span className="header-preview">Sample data</span>
+            <span className="q-avatar" aria-label={workspace}>
+              {monogram}
             </span>
+            <form action={signOut}>
+              <button type="submit" className="q-button q-button--quiet sign-out">
+                Sign out
+              </button>
+            </form>
           </div>
         </header>
         <Navigation

@@ -115,7 +115,7 @@ The hierarchy is `Study → Participant → Conversation → Raw Evidence → De
 
 Raw interview evidence is the source of truth. Findings must not replace messages or turn interpretations into participant quotes. Researchers must eventually be able to inspect, search, and filter messages independently of a summary, including counter-evidence.
 
-M2.5 demonstrates this with sample messages and explicit finding-to-message links, not generated agent findings. Actual storage, durable evidence guarantees, and AI findings generation remain unimplemented. The validated M2 realtime transcript is still session-local.
+M2.5 demonstrates this with sample messages and explicit finding-to-message links, not generated agent findings. M4 Stage 1 defines the durable guarantees in the database: immutable messages, on-screen answers stored as both a message and a structured response, and findings that must cite supporting messages (see ARCHITECTURE, M4 persistence foundation). Writing live interviews to it, and AI findings generation, remain unimplemented. The validated realtime transcript is still session-local.
 
 M3 adds on-screen answers as evidence: a participant's tap, slider value, or selection becomes a participant message in the same transcript, marked as given on screen. The `display` field in the structured response above is realised as a `DisplayAction` with four types. In M3 application code decides whether and when a predefined visual appears; the LLM is told what is on screen and asked to respond neutrally, and it does not choose or author visuals.
 
