@@ -24,7 +24,7 @@ import time
 from dotenv import load_dotenv
 
 from livekit import rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, llm
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, StopResponse, cli, llm
 from livekit.agents.voice.room_io import RoomOptions, TextInputEvent, TextInputOptions
 from livekit.plugins import groq, silero
 
@@ -33,6 +33,9 @@ from conductor import Conductor
 from failures import chat_item, from_error_event, signaling_failure
 from latency import install_latency_logging
 from opening import OpeningTurn
+from persistence import (REAL_ROOM, EvidenceError, EvidenceWriter,
+                         SupabaseEvidenceAPI, occurred_at, persist_then_continue)
+from turn_input import handle_text_input
 from presence import check_in_allowed, inactivity_prompt, next_check_at
 from signals import Exchange, classify
 from speech import SpeechFilter
@@ -81,13 +84,60 @@ INSTRUCTIONS = (
 )
 
 
+class EvidenceTracedLLM(groq.LLM):
+    """Timing-only trace at the actual model chat invocation for live acceptance."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_ack: tuple[str, int] | None = None
+
+    def chat(self, *args, **kwargs):
+        kind, sequence = self.last_ack or ("opening", -1)
+        logger.info("[qalvi evidence order] phase=llm_chat_begin turn=%s sequence=%d monotonic_ns=%d",
+                    kind, sequence, time.monotonic_ns())
+        return super().chat(*args, **kwargs)
+
+
 class Interviewer(Agent):
-    def __init__(self, room: rtc.Room, conductor: Conductor, classifier) -> None:
+    def __init__(self, room: rtc.Room, conductor: Conductor, classifier,
+                 writer: EvidenceWriter | None = None,
+                 traced_llm: EvidenceTracedLLM | None = None) -> None:
         super().__init__(instructions=INSTRUCTIONS)
         self._room = room
         self._conductor = conductor
         self._classifier = classifier
         self._recent: list[Exchange] = []
+        self._writer = writer
+        self._traced_llm = traced_llm
+        self._paused = False
+        self._advanced_turns: set[str] = set()
+        self._assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = None
+
+    def mark_evidence_ack(self, kind: str, sequence: int) -> None:
+        if self._traced_llm:
+            self._traced_llm.last_ack = (kind, sequence)
+            logger.info("[qalvi evidence order] phase=db_ack turn=%s sequence=%d monotonic_ns=%d",
+                        kind, sequence, time.monotonic_ns())
+
+    async def flush_assistant(self) -> None:
+        if self._assistant_queue:
+            try:
+                await asyncio.wait_for(self._assistant_queue.join(), timeout=15)
+            except asyncio.TimeoutError as exc:
+                raise EvidenceError("Prior assistant evidence was not acknowledged") from exc
+        if self._paused:
+            raise EvidenceError("Interview evidence is paused")
+
+    async def pause_evidence(self) -> None:
+        if self._paused:
+            return
+        self._paused = True
+        try:
+            await self._room.local_participant.set_attributes({"qalvi.session.status": "interrupted"})
+        except Exception:
+            logger.warning("Could not publish interview interruption state to the room")
+        if self._writer:
+            await self._writer.interrupt()
 
     def remember(self, role: str, text: str) -> None:
         if text:
@@ -131,7 +181,33 @@ class Interviewer(Agent):
 
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         # Spoken turns. turn_ctx is temporary, so guidance only shapes this one reply.
-        guidance = await self.present(new_message.text_content or "")
+        if self._paused:
+            raise StopResponse()
+        if self._writer:
+            content = new_message.text_content or ""
+            if not content.strip():
+                raise StopResponse()
+            key = "voice:" + new_message.id
+            guidance = None
+            async def advance(saved):
+                nonlocal guidance
+                if not saved.inserted:
+                    raise StopResponse()
+                if key in self._advanced_turns:
+                    raise StopResponse()
+                self._advanced_turns.add(key)
+                self.mark_evidence_ack("voice", saved.sequence)
+                guidance = await self.present(content)
+            try:
+                await self.flush_assistant()
+                await persist_then_continue(
+                    lambda: self._writer.append(key, "participant", "voice", content,
+                                                occurred_at(new_message.created_at)), advance)
+            except EvidenceError:
+                await self.pause_evidence()
+                raise StopResponse() from None
+        else:
+            guidance = await self.present(new_message.text_content or "")
         if guidance:
             turn_ctx.add_message(role="system", content=guidance)
 
@@ -150,20 +226,75 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
+    real = bool(REAL_ROOM.fullmatch(ctx.room.name))
+    if not real and not ctx.room.name.startswith("qalvi-demo-"):
+        return
+    evidence_api: SupabaseEvidenceAPI | None = None
+    writer: EvidenceWriter | None = None
+    real_participant = None
+    if real:
+        try:
+            evidence_api = SupabaseEvidenceAPI.from_env()
+            real_participant = await ctx.wait_for_participant()
+            writer = await EvidenceWriter.claim(evidence_api, ctx.room.name, real_participant.identity)
+        except EvidenceError:
+            logger.error("Real interview could not acquire its evidence writer")
+            if ctx.room.isconnected():
+                await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
+            if evidence_api:
+                await evidence_api.close()
+            return
     stt = groq.STT(model="whisper-large-v3-turbo")
-    llm_model = groq.LLM(model="openai/gpt-oss-120b")
+    llm_model = (EvidenceTracedLLM if real else groq.LLM)(model="openai/gpt-oss-120b")
     classifier = groq.LLM(model="openai/gpt-oss-120b", reasoning_effort="low", max_completion_tokens=300)
     tts = groq.TTS(model="canopylabs/orpheus-v1-english", voice="autumn")
     session = AgentSession(vad=silero.VAD.load(), stt=stt, llm=llm_model, tts=tts,
-                           user_away_timeout=USER_AWAY_TIMEOUT)
+                           user_away_timeout=USER_AWAY_TIMEOUT,
+                           **({"turn_handling": {"preemptive_generation": {"enabled": False}}}
+                              if real else {}))
     install_latency_logging(session, room_name=ctx.room.name, stt=stt, llm=llm_model, tts=tts)
 
     steps = demo_steps_for_room(ctx.room.name)
     clock = InterviewClock(DEMO_BUDGET if steps else None)
     conductor = Conductor(steps, clock, goal=DEMO_GOAL) if steps else Conductor(steps, clock)
-    agent = Interviewer(ctx.room, conductor, classifier)
+    agent = Interviewer(ctx.room, conductor, classifier, writer,
+                        llm_model if isinstance(llm_model, EvidenceTracedLLM) else None)
     opening = OpeningTurn()
     presence = {"nudges": 0, "task": None}
+    assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = asyncio.Queue() if writer else None
+    agent._assistant_queue = assistant_queue
+
+    async def save_assistant_items() -> None:
+        assert assistant_queue is not None and writer is not None
+        while True:
+            item, channel = await assistant_queue.get()
+            try:
+                content = item.text_content or ""
+                if content.strip():
+                    await writer.append("assistant:" + item.id, "interviewer",
+                                        channel, content,
+                                        occurred_at(item.created_at), item.interrupted)
+            except Exception:
+                logger.error("Assistant evidence acknowledgement failed; interview interrupted")
+                await agent.pause_evidence()
+            finally:
+                assistant_queue.task_done()
+
+    assistant_task = asyncio.create_task(save_assistant_items()) if writer else None
+
+    async def close_evidence() -> None:
+        if assistant_queue:
+            try:
+                await asyncio.wait_for(assistant_queue.join(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.error("Assistant evidence queue did not drain before shutdown")
+        if assistant_task:
+            assistant_task.cancel()
+        if evidence_api:
+            await evidence_api.close()
+
+    if writer:
+        ctx.add_shutdown_callback(close_evidence)
 
     def participant() -> rtc.RemoteParticipant | None:
         return next(iter(ctx.room.remote_participants.values()), None)
@@ -212,6 +343,8 @@ async def entrypoint(ctx: JobContext):
         role, text = entry
         if role == "assistant":
             agent.remember("qalvi", text)
+            if assistant_queue is not None and not agent._paused:
+                assistant_queue.put_nowait((event.item, "voice" if voice["available"] else "text"))
         elif role == "user":
             clock.end_exclusion()
             presence["nudges"] = 0
@@ -250,23 +383,20 @@ async def entrypoint(ctx: JobContext):
             stop_watching()
 
     async def on_text_input(sess: AgentSession, event: TextInputEvent) -> None:
-        # Typed messages and on-screen answers skip on_user_turn_completed, so the same
-        # seam runs here. Mirrors the framework default: interrupt, then reply.
-        async with sess._claim_user_turn():
-            await sess.interrupt()
-            guidance = await agent.present(event.text)
-            if guidance:
-                sess.generate_reply(user_input=event.text, instructions=guidance)
-            else:
-                sess.generate_reply(user_input=event.text)
+        await handle_text_input(sess, event, agent, writer, ctx.room,
+                                real_participant.identity if real_participant else None)
 
     await session.start(
         agent=agent,
         room=ctx.room,
         room_options=RoomOptions(text_input=TextInputOptions(text_input_cb=on_text_input)),
     )
-    if not await opening.start(session, ctx.wait_for_participant):
+    wait_for_opening = (lambda: ctx.wait_for_participant(identity=real_participant.identity)) \
+        if real_participant else ctx.wait_for_participant
+    if not await opening.start(session, wait_for_opening):
         await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
+        if writer:
+            await writer.interrupt()
         await session.aclose()
 
 

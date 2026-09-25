@@ -1,10 +1,10 @@
-# Qalvi Voice Agent (Milestone 2 voice, Milestone 3 visuals)
+# Qalvi Voice Agent
 
 A small Python [LiveKit Agents](https://docs.livekit.io/agents/) worker that
 joins the same LiveKit room as the participant's browser and runs a
 Groq-powered STT → LLM → TTS pipeline. See `../AGENTS.md` and `../docs/` for
-product context — this service intentionally contains no interview-engine,
-Supabase, or Korra-specific logic yet.
+product context. Real interview rooms use an agent-only Supabase secret key to
+persist canonical transcript evidence. Demo rooms never write real evidence.
 
 ## Visuals and conversational control (Milestone 3)
 
@@ -78,10 +78,21 @@ python main.py console
 | `LIVEKIT_API_KEY` | LiveKit API key (server-side only) |
 | `LIVEKIT_API_SECRET` | LiveKit API secret (server-side only) |
 | `GROQ_API_KEY` | Groq API key for STT (Whisper), the LLM, and TTS |
+| `SUPABASE_URL` | Qalvi Supabase project URL for real interview persistence |
+| `SUPABASE_SECRET_KEY` | Agent-only `sb_secret_` key for privileged evidence RPCs |
 
 These must match the `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`
 used by the Next.js app's `.env.local` — both sides join the same LiveKit
 project.
+
+Real interview rooms also need `SUPABASE_URL` and `SUPABASE_SECRET_KEY` in the
+agent runtime. Do not place that key in a browser variable or log it. The agent
+resolves the room to a consented conversation, claims a fenced writer generation,
+and writes canonical participant turns before reply generation. Completed
+assistant conversation items are stored with their interruption flag. Typed
+participant input receives a `qalvi.evidence` acknowledgement only after the
+database confirms the write. The demo rooms retain their original behavior and
+do not write evidence. Microphone audio is not recorded.
 
 ## Development latency diagnostics
 

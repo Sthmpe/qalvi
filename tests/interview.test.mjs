@@ -71,7 +71,7 @@ test("stream ID is the fallback, never transcript text", async () => {
   assert.equal(messages[0].id, transcriptId("user", "stream-a"));
 });
 
-function sessionHarness() {
+function sessionHarness(tokenEndpoint) {
   const slots = [];
   let cursor = 0;
   const rooms = [];
@@ -98,9 +98,10 @@ function sessionHarness() {
     }
     on(event, callback) { this.handlers.set(event, callback); }
     registerTextStreamHandler(topic, handler) {
-      assert.ok(["lk.transcription", "qalvi.display"].includes(topic), `Unexpected topic ${topic}`);
+      assert.ok(["lk.transcription", "qalvi.display", "qalvi.evidence"].includes(topic), `Unexpected topic ${topic}`);
       if (topic === "lk.transcription") this.transcription = handler;
-      else this.display = handler;
+      else if (topic === "qalvi.display") this.display = handler;
+      else this.evidence = handler;
     }
     async startAudio() {}
     async connect() { if (this.failConnect) throw new Error("offline"); this.engine.isClosed = false; this.state = "connected"; }
@@ -133,8 +134,34 @@ function sessionHarness() {
     clearInterval: (id) => intervals.delete(id),
     fetch: async (_, options) => { requests.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ serverUrl: "mock", token: "mock" }) }; },
   });
-  return { rooms, requests, tick: (ms = 1000) => { now += ms; for (const fn of intervals.values()) fn(); }, render: () => { cursor = 0; return runHook(); } };
+  return { rooms, requests, tick: (ms = 1000) => { now += ms; for (const fn of intervals.values()) fn(); }, render: () => { cursor = 0; return runHook(tokenEndpoint); } };
 }
+
+test("real typed input waits for durable evidence ack and reuses its event ID on retry", async () => {
+  const h = sessionHarness("/interview/api/token");
+  await h.render().start("text");
+  const room = h.rooms[0];
+  assert.deepEqual(h.requests[0], {});
+  const first = h.render().sendText("Keep this as evidence");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(room.localParticipant.sent.length, 1);
+  assert.equal(h.render().messages.length, 0);
+  const attrs = room.localParticipant.sent[0].options.attributes;
+  assert.match(attrs["qalvi.event_id"], /^[0-9a-f-]{36}$/);
+  await room.evidence({ readAll: async () => JSON.stringify({ eventId: attrs["qalvi.event_id"], status: "failed" }) },
+    { identity: "agent" });
+  assert.equal(await first, false);
+  assert.equal(h.render().messages.length, 0);
+  const retry = h.render().sendText("Keep this as evidence");
+  await Promise.resolve();
+  assert.equal(room.localParticipant.sent[1].options.attributes["qalvi.event_id"], attrs["qalvi.event_id"]);
+  assert.equal(room.localParticipant.sent[1].options.attributes["qalvi.event_at"], attrs["qalvi.event_at"]);
+  await room.evidence({ readAll: async () => JSON.stringify({ eventId: attrs["qalvi.event_id"], status: "saved" }) },
+    { identity: "agent" });
+  assert.equal(await retry, true);
+  assert.equal(h.render().messages.length, 1);
+});
 
 test("signaling recovery never shows listening and preserves evidence and the active visual", async () => {
   const h = sessionHarness();

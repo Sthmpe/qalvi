@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 has not started.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -160,14 +160,41 @@ cancellation. The fixture was removed. A WebRTC agent conversation was not run
 for this gateway-only stage.
 Cancellation blocks new Qalvi session access but does not yet remove a connected
 LiveKit participant or invalidate an already issued five-minute token. Address
-this with the real-session lifecycle in Stage 2B.3/2B.4.
+this with the real-session lifecycle in Stage 2B.4.
 
-Stage 2B.3 and later (not started): agent canonical transcript writes, visual
-response persistence integration, browser transcript reconstruction, and real
-researcher evidence reads. No real interview transcript is saved yet. Before
-LLM response generation, Stage 2B.3 must durably commit canonical participant
-transcripts and gate LiveKit's default preemptive generation so it cannot race
-ahead of that commit.
+Stage 2B.3 delivered: a real-room-only Python writer resolves the
+server-created LiveKit room to one consented conversation and participant,
+claims a fenced writer generation, and appends completed voice and typed turns
+through the ordered, idempotent Stage 2B.1 RPC. Real-room preemptive generation
+is disabled. The voice callback and typed stream handler await a durable append
+before Qalvi advances. Real typed sends carry a stable application event ID and
+the browser waits for a same-room evidence acknowledgement before clearing the
+draft. Assistant conversation items persist forwarded text and the SDK
+interruption flag. Bounded retries use the same event key and payload; failure
+pauses the agent and attempts to mark the conversation interrupted. The demo
+remains on its existing local-only behavior. Linked-project acceptance passed
+for room mapping, invitation claim, ordered voice/text/assistant rows,
+lost-acknowledgement retry, idempotency, writer fencing, and anonymous denial.
+Controlled Cloud acceptance used a real WebRTC room and an audio-published
+participant. One completed STT voice turn produced one canonical participant
+message; the assistant opening, voice response, typed response, and their
+participant turns reconstructed in database sequence. Agent timing logs showed
+the voice database acknowledgement 536 ms before LLM chat invocation, and the
+typed acknowledgement 493 ms before its LLM chat invocation. Same-key typed
+retry produced no duplicate evidence. A separate linked-project failure
+injection confirmed that an unacknowledged turn pauses without advancing the
+LLM, while retrying a lost acknowledgement resolves to the existing row.
+Temporary acceptance fixtures were removed. A longer audio sample split into
+two distinct final STT turns, so turn segmentation remains dependent on VAD/STT.
+
+Stage 2B.4 and later (not started): visual display/response persistence,
+browser transcript reconstruction and full reconnect recovery, and real
+researcher evidence reads. No findings generation or analytics are included.
+Human microphone/browser-device acceptance remains unperformed. A replacement
+agent cannot yet reconstruct transcript or interview context; browser transcript
+reconstruction and reconnect recovery are also outstanding. Visual display and
+response persistence is not yet integrated. Cancellation does not yet eject an
+already-connected LiveKit participant.
 
 Store:
 - studies

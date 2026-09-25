@@ -12,6 +12,7 @@ import {
 
 /** Text stream topic the agent uses to put a predefined visual on screen. */
 export const DISPLAY_TOPIC = "qalvi.display";
+const EVIDENCE_TOPIC = "qalvi.evidence";
 
 /** Agent attribute set when speech synthesis is unavailable and the interview continues in text. */
 export const VOICE_ATTRIBUTE = "qalvi.voice";
@@ -27,6 +28,7 @@ function mapAgentState(state: string | undefined): InterviewStatus | null {
 }
 
 export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
+  const realSession = tokenEndpoint !== "/api/livekit-token";
   const [status, setStatus] = useState<InterviewStatus>("idle");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
@@ -52,6 +54,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
   const connectionRef = useRef<ConnectionStatus>("disconnected");
   const reconnectRef = useRef<(() => Promise<void>) | null>(null);
   const interruptedSend = useRef<(() => void) | null>(null);
+  const pendingEvidence = useRef<{ id: string; wire: string; at: string } | null>(null);
+  const evidenceResults = useRef(new Map<string, "saved" | "failed">());
+  const evidenceWaiter = useRef<{ id: string; resolve: (status: "saved" | "failed") => void } | null>(null);
   const desiredMic = useRef(false);
   const monitor = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconcileRef = useRef<(() => void) | null>(null);
@@ -87,6 +92,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     pendingTurn.current = null;
     knownAiSegments.current.clear();
     completedAiSegments.current.clear();
+    pendingEvidence.current = null;
+    evidenceResults.current.clear();
+    evidenceWaiter.current = null;
     setTurn(null);
     const room = roomRef.current;
     roomRef.current = null;
@@ -128,6 +136,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     let openingExpected = false;
     let hasConnected = false;
     let sessionUnavailable = false;
+    let evidenceInterrupted = false;
     const room = new Room();
     roomRef.current = room;
     const current = () => roomRef.current === room && generation.current === attempt;
@@ -148,13 +157,21 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       detachAudio();
       activeDisplay.current = null;
       setVisualReady(false);
-      setError(sessionUnavailable
-        ? "The previous interview has ended and cannot be resumed. Your transcript is still here. Open a new interview to begin again."
-        : "Connection lost. Your conversation and draft are still here. Reconnect to try to resume.");
+      setError(evidenceInterrupted
+        ? "The interview paused because evidence could not be confirmed as saved. Your transcript and draft remain here."
+        : sessionUnavailable
+          ? "The previous interview has ended and cannot be resumed. Your transcript is still here. Open a new interview to begin again."
+          : "Connection lost. Your conversation and draft are still here. Reconnect to try to resume.");
     };
     const updateAgent = () => {
       if (!current() || connectionRef.current !== "connected" || sessionHealth(room) !== "connected") return;
       const agent = [...room.remoteParticipants.values()].find((p) => p.isAgent);
+      if (agent?.attributes["qalvi.session.status"] === "interrupted") {
+        evidenceInterrupted = true;
+        failConnection();
+        void room.disconnect();
+        return;
+      }
       if (agent?.attributes["qalvi.session.status"] === "unavailable") {
         sessionUnavailable = true;
         failConnection();
@@ -285,9 +302,19 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       setDisplayResponse(null);
       timing("display_received", { display: action.id, type: action.type });
     });
+    if (realSession) room.registerTextStreamHandler(EVIDENCE_TOPIC, async (reader, participant) => {
+      if (!current() || !room.remoteParticipants.get(participant.identity)?.isAgent) return;
+      let result: unknown;
+      try { result = JSON.parse(await reader.readAll()); } catch { return; }
+      if (!result || typeof result !== "object") return;
+      const ack = result as { eventId?: unknown; status?: unknown };
+      if (typeof ack.eventId !== "string" || !/^[0-9a-f-]{36}$/i.test(ack.eventId) ||
+          (ack.status !== "saved" && ack.status !== "failed")) return;
+      evidenceResults.current.set(ack.eventId, ack.status);
+      if (evidenceWaiter.current?.id === ack.eventId) evidenceWaiter.current.resolve(ack.status);
+    });
     // Resume browser audio while still inside the Start button's user gesture.
     void room.startAudio().catch(() => { if (current()) setAudioBlocked(true); });
-    const realSession = tokenEndpoint !== "/api/livekit-token";
     const identity = `participant-${crypto.randomUUID()}`;
     const roomName = `qalvi-demo-${crypto.randomUUID()}`;
     let joining = false;
@@ -336,7 +363,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     };
     reconnectRef.current = join;
     await join();
-  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint]);
+  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint, realSession]);
 
   const reconnect = useCallback(async () => {
     if (connectionRef.current === "failed" || connectionRef.current === "disconnected") {
@@ -378,11 +405,34 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const interruption = new Promise<never>((_, reject) => {
       interruptedSend.current = () => reject(new Error("Send interrupted"));
-      timeout = setTimeout(() => reject(new Error("Send timed out")), 15000);
+      timeout = setTimeout(() => reject(new Error("Send timed out")), realSession ? 45000 : 15000);
     });
     try {
-      const info = await Promise.race([room.localParticipant.sendText(wire, { topic: "lk.chat" }), interruption]);
+      if (realSession && shown.source === "visual") {
+        setError("On-screen answers are not available in this live study yet.");
+        return false;
+      }
+      const pending = realSession
+        ? pendingEvidence.current?.wire === wire ? pendingEvidence.current
+          : { id: crypto.randomUUID(), wire, at: new Date().toISOString() }
+        : null;
+      if (pending) pendingEvidence.current = pending;
+      const info = await Promise.race([room.localParticipant.sendText(wire, {
+        topic: "lk.chat", ...(pending ? { attributes: {
+          "qalvi.event_id": pending.id, "qalvi.event_at": pending.at,
+        } } : {}),
+      }), interruption]);
       if (roomRef.current !== room) return false;
+      if (pending) {
+        const acknowledgement = evidenceResults.current.get(pending.id) ?? await Promise.race([
+          new Promise<"saved" | "failed">((resolve) => { evidenceWaiter.current = { id: pending.id, resolve }; }),
+          interruption,
+        ]);
+        evidenceWaiter.current = null;
+        evidenceResults.current.delete(pending.id);
+        if (acknowledgement !== "saved") throw new Error("Evidence was not saved");
+        pendingEvidence.current = null;
+      }
       // LiveKit does not echo outgoing chat messages to their sender.
       setMessages((previous) => upsertTranscript(previous, {
         id: transcriptId(room.localParticipant.identity, info.id),
@@ -407,7 +457,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       interruptedSend.current = null;
       if (roomRef.current === room) { sendingRef.current = false; setSending(false); }
     }
-  }, [agentReady, expectResponse]);
+  }, [agentReady, expectResponse, realSession]);
 
   const sendText = useCallback((text: string) => {
     const trimmed = text.trim();

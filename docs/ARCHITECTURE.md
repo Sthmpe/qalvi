@@ -429,10 +429,63 @@ Stage 2B.2 does not write transcript turns or change the agent. Stage 2B.3 must
 commit each canonical participant transcript before LLM generation; LiveKit's
 default preemptive generation must be disabled or gated for persisted sessions.
 
+### Stage 2B.3 SDK turn-boundary finding (installed LiveKit Agents 1.8)
+
+In the installed SDK, an end-of-turn creates a `ChatMessage` and awaits
+`Agent.on_user_turn_completed` before scheduling its normal reply. The final
+`user_input_transcribed` event is only an STT notification and may precede the
+end-of-turn decision; it is not the canonical write boundary. The default
+`preemptive_generation.enabled` is `True`, however, and starts an LLM request
+from a tentative transcript before that awaited callback. Persisted sessions
+must use `turn_handling={"preemptive_generation": {"enabled": False}}` so an
+awaited append in `on_user_turn_completed` genuinely gates generation.
+
+Typed `lk.chat` text streams reach `TextInputEvent(text, info, participant)`;
+Python calls the stream identity `info.stream_id`. The custom text callback
+must await the append before calling `generate_reply`.
+`conversation_item_added` carries an SDK `ChatMessage.id`, `text_content`, and
+`interrupted` flag. For assistants it fires after the SDK has produced the
+forwarded/played text, skipping unsent output; this is stronger evidence of
+delivery than model generation, though it cannot prove a browser speaker played
+every audio sample. Speech-turn `ChatMessage.id` is the voice idempotency
+source. Since the browser SDK generates a fresh stream ID for each `sendText`
+retry, real typed messages carry a browser-generated stable event ID and event
+time in text-stream attributes. Neither grants authorization. The composer
+retains that ID while retrying unchanged text and waits for a `qalvi.evidence`
+agent acknowledgement before clearing its draft.
+
+`agent/persistence.py` uses a separate agent-only `SUPABASE_SECRET_KEY` client.
+It reads the room mapping and active resume record, verifies LiveKit remote
+identity against the saved participant, then claims the Stage 2B.1 writer
+generation. Raw evidence is written only through `append_interview_message`.
+The RPC locks the conversation, allocates its sequence, enforces fencing and
+immutability, and resolves same-key retries. A transport timeout is retried
+with the same payload up to three times; a hard conflict stops immediately.
+Voice, typed, and assistant keys have distinct namespaces. Agent event time is
+separate from database commit time. Demo rooms never write real evidence.
+
+Assistant `conversation_item_added` is queued after the SDK has forwarded the
+text it considers played. The SDK omits skipped output and marks partial output
+as interrupted. Before appending a new participant turn, the agent waits for
+prior queued assistant evidence to commit, preserving conversational sequence.
+This is the strongest available representation of what Qalvi
+emitted, but it is not proof every sample reached the participant's speakers.
+If an assistant write fails, Qalvi stops accepting further turns and marks the
+conversation interrupted where possible; already emitted sound cannot be
+retracted. Audio recording remains off. Browser transcript reconstruction,
+visual evidence integration, and full replacement-agent recovery remain later
+work. Linked database and controlled Cloud WebRTC acceptance passed: for one
+completed voice turn the database acknowledged sequence 1 before the matching
+LLM chat call began; typed input followed the same ordering. The acceptance
+participant published synthesized speech over an actual WebRTC audio track,
+so human microphone/device behavior was not assessed. A linked-project
+failure injection separately verified pause-before-generation and same-key
+lost-acknowledgement recovery; it was not a Cloud failure exercise.
+
 Cancellation currently closes application-level resume and token issuance, but
 does not remove an already-connected participant from LiveKit. A previously
 issued five-minute token may also permit reconnection until it expires. The
-LiveKit lifecycle work in Stage 2B.3/2B.4 must remove the active participant
+LiveKit lifecycle work in Stage 2B.4 must remove the active participant
 and prevent continued room use when a conversation becomes terminal.
 
 ### Integrity rules

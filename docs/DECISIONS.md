@@ -395,4 +395,39 @@ legacy JWTs under that variable. Do not attach researcher cookies to this client
 Disabling the legacy API keys is a separate dashboard operation after all
 application paths have passed with publishable/secret keys. Cancellation stops
 new application access, but existing LiveKit connections and unexpired issued
-tokens still need terminal-session removal in Stage 2B.3/2B.4.
+tokens still need terminal-session removal in Stage 2B.4.
+
+## 2026-09-25 — M4 Stage 2B.3 canonical transcript gate
+
+The installed LiveKit Agents SDK starts tentative LLM work before the awaited
+voice turn callback unless preemptive generation is disabled. Disable it only
+for persisted real rooms, then make the completed-turn callback await the
+Stage 2B.1 append RPC before calling the conductor or allowing a reply. Typed
+streams have their own callback and follow the same write-before-reply rule.
+The browser's transport `sendText` completion is not durable success: a real
+typed draft clears only after a same-room agent acknowledgement of the database
+message. A stable client event ID spans retries because the SDK allocates a new
+text stream ID for every retry. Its value is an idempotency key, never a tenant
+or authorization claim.
+
+Use an isolated agent-only `sb_secret_` client with no legacy JWT fallback.
+Trusted LiveKit room and participant identity select the saved conversation;
+the database RPC claims a fenced writer generation and owns sequence allocation.
+Voice, typed, and assistant keys have distinct namespaces. Retry uncertain
+acknowledgements with the same event key and full payload, never a new one.
+Pause on persistent write failure rather than generate an unsaved response.
+Persist SDK-forwarded assistant text with its interruption flag, not raw LLM
+completion. This cannot prove device-level audio delivery. No microphone audio
+is recorded. No distributed exactly-once claim is made.
+
+Linked-project database acceptance passed with temporary fixtures that were
+deleted. Controlled Cloud acceptance on 2026-09-25 then used a real LiveKit
+WebRTC room and synthesized speech on its microphone track. One final voice
+turn yielded one saved participant message; the assistant opening and replies,
+plus a typed turn, persisted in one ordered conversation. Agent timing logs
+placed the database acknowledgement before the corresponding LLM chat call
+for voice and text. A typed same-key retry added no row. Separate linked-project
+failure injection confirmed that a failed append pauses without LLM advancement
+and that a lost-acknowledgement retry returns the existing message. Cancellation
+ejection, replacement-agent history reconstruction, visual evidence, and
+researcher live reads remain outside Stage 2B.3.
