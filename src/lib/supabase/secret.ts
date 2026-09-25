@@ -9,14 +9,14 @@ import { supabasePublicConfig } from "./config";
  * evidence or save an unsupported finding. `server-only` makes importing it from
  * client code a build error, so the secret key never reaches a browser.
  *
- * Nothing uses it yet. Researchers act through their own session, and live
- * interview persistence (M4 Stage 2B) will decide how evidence is written.
+ * Stage 2B.2 uses it only for invitation metadata and the narrow claim/resume
+ * RPCs. Researcher authorization still happens through their own RLS client.
  */
 export function createSupabaseSecretClient() {
   const { url } = supabasePublicConfig();
   const secretKey = process.env.SUPABASE_SECRET_KEY;
-  if (!secretKey) {
-    throw new Error("Supabase elevated access is not configured. Set SUPABASE_SECRET_KEY on the server.");
+  if (!secretKey?.startsWith("sb_secret_")) {
+    throw new Error("Supabase elevated access requires a server-side Supabase secret key.");
   }
   return createClient<Database>(url, secretKey, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },

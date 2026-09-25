@@ -394,6 +394,19 @@ describe("live interview persistence foundation", () => {
     await assert.rejects(claim(token), /invitation is unavailable/);
     const saved = await one("select count(*)::int as n from conversations where id = $1", [conversation]);
     assert.equal(saved.n, 1);
+    assert.equal((await one("select count(*)::int as n from participants where id = (select participant_id from conversations where id = $1)",
+      [conversation])).n, 1);
+    const simultaneous = await issueInvitation();
+    const attempts = await pipeline(() => Promise.allSettled([
+      db.query("select public.claim_interview_invitation($1,$2,$3,'consent-v1') as id",
+        [simultaneous.token, hash(), `qalvi-real-${randomUUID()}`]),
+      db.query("select public.claim_interview_invitation($1,$2,$3,'consent-v1') as id",
+        [simultaneous.token, hash(), `qalvi-real-${randomUUID()}`]),
+    ]));
+    assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
+    assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
+    assert.equal((await one("select count(*)::int as n from conversations where id = (select conversation_id from interview_invitations where id = $1)",
+      [simultaneous.id])).n, 1);
     const revoked = await issueInvitation();
     await pipeline(() => db.query("update interview_invitations set revoked_at = now() where id = $1", [revoked.id]));
     await assert.rejects(claim(revoked.token), /invitation is unavailable/);
@@ -425,6 +438,13 @@ describe("live interview persistence foundation", () => {
     assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id, null);
     await pipeline(() => db.query(
       "insert into interview_resumes(conversation_id, token_hash) values ($1,$2)", [conversation, hash()]));
+    const another = await claim((await issueInvitation()).token);
+    await pipeline(() => db.query("update interview_resumes set revoked_at = now() where conversation_id = $1", [another]));
+    const expiredHash = hash();
+    await pipeline(() => db.query(
+      `insert into interview_resumes(conversation_id, token_hash, created_at, expires_at)
+       values ($1,$2,now() - interval '25 hours',now() - interval '1 hour')`, [another, expiredHash]));
+    assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [expiredHash]))).id, null);
   });
 
   test("writer generations fence replacements; ordered append retries do not duplicate evidence", async () => {
@@ -469,7 +489,8 @@ describe("live interview persistence foundation", () => {
   test("lifecycle transitions require consent and reject impossible resumptions", async () => {
     const invite = await issueInvitation();
     const room = `qalvi-real-${randomUUID()}`;
-    const conversation = await claim(invite.token, hash(), room);
+    const resume = hash();
+    const conversation = await claim(invite.token, resume, room);
     await assert.rejects(pipeline(() => db.query(
       "select public.transition_interview_conversation($1,0,'completed')", [conversation])),
       /invalid conversation status transition/);
@@ -489,6 +510,7 @@ describe("live interview persistence foundation", () => {
     await assert.rejects(pipeline(() => db.query(
       "update conversations set consent_version = 'changed' where id = $1", [conversation])), /consent is immutable/);
     assert.equal((await one("select ended_at is not null as ended from conversations where id = $1", [conversation])).ended, true);
+    assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id, null);
   });
 
   test("visual issue, render receipt and answer are distinct atomic evidence steps", async () => {

@@ -3,9 +3,8 @@ import { HOME_PATH, SIGN_IN_PATH, isResearcherPath, safeNext, signInPathFor } fr
 import { supabaseConfigured } from "@/lib/supabase/config";
 import { refreshSession } from "@/lib/supabase/proxy";
 
-// Researcher routes only. Participant interviews (/interview/*) and the LiveKit
-// token route are deliberately absent: participants never authenticate, and the
-// interview must not depend on Supabase being reachable.
+// Researcher routes only. Participants use a separate invitation and HTTP-only
+// resume capability; the proxy must never treat them as researcher Auth users.
 export const config = {
   matcher: ["/", "/dashboard/:path*", "/studies/:path*", "/sign-in"],
 };

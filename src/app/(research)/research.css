@@ -1154,6 +1154,31 @@
   color: var(--q-graphite);
   margin-top: 6px;
 }
+.invitation-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 24px 0;
+  padding: 18px;
+  border-radius: 12px;
+  background: #f3f4f6;
+  color: #4b4f58;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+}
+.invitation-consent input { width: 20px; height: 20px; flex: none; margin-top: 1px; accent-color: #4f46e5; }
+.live-invitation-panel { margin-top: 48px; padding: 28px; border: 1px solid #e6e6eb; border-radius: 18px; background: #fff; }
+.live-invitation-panel h2 { margin: 8px 0; font-size: 22px; }
+.live-invitation-panel p { color: #4b4f58; }
+.live-invitation-form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 20px; }
+.live-invitation-form label { width: 100%; font-size: 13px; }
+.live-invitation-form select, .live-invitation-result input { min-width: 0; flex: 1 1 220px; padding: 12px; border: 1px solid #d8d9df; border-radius: 10px; background: #fff; }
+.live-invitation-result { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 20px; }
+.live-invitation-result p { width: 100%; }
+.participant-session-unavailable { min-height: 100dvh; max-width: 520px; margin: auto; padding: 20vh 24px 32px; color: #25282d; }
+.participant-session-unavailable h1 { font-size: 30px; }
+.participant-session-unavailable p { margin: 16px 0; color: #4b4f58; }
 @media (min-width: 1600px) {
   .research-main {
     padding-top: 60px;

@@ -26,7 +26,7 @@ function mapAgentState(state: string | undefined): InterviewStatus | null {
   }
 }
 
-export function useLiveKitSession() {
+export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
   const [status, setStatus] = useState<InterviewStatus>("idle");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
@@ -287,6 +287,7 @@ export function useLiveKitSession() {
     });
     // Resume browser audio while still inside the Start button's user gesture.
     void room.startAudio().catch(() => { if (current()) setAudioBlocked(true); });
+    const realSession = tokenEndpoint !== "/api/livekit-token";
     const identity = `participant-${crypto.randomUUID()}`;
     const roomName = `qalvi-demo-${crypto.randomUUID()}`;
     let joining = false;
@@ -296,15 +297,18 @@ export function useLiveKitSession() {
       changeConnection("connecting");
       setError(null);
       try {
-        const res = await fetch("/api/livekit-token", {
+        const res = await fetch(tokenEndpoint, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ roomName, identity, resume: hasConnected }), signal: AbortSignal.timeout(15000),
+          body: JSON.stringify(realSession ? {} : { roomName, identity, resume: hasConnected }), signal: AbortSignal.timeout(15000),
         });
         if (!res.ok) throw new Error("Could not reach the interview server.");
         const { serverUrl, token } = await res.json() as { serverUrl: string; token: string };
         if (!current()) return;
         await room.connect(serverUrl, token);
         if (!current()) { void room.disconnect(); return; }
+        if (realSession) {
+          void fetch("/interview/api/joined", { method: "POST" }).catch(() => {});
+        }
         setIsActive(true);
         hasConnected = true;
         changeConnection("connected");
@@ -332,7 +336,7 @@ export function useLiveKitSession() {
     };
     reconnectRef.current = join;
     await join();
-  }, [changeConnection, detachAudio, expectResponse]);
+  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint]);
 
   const reconnect = useCallback(async () => {
     if (connectionRef.current === "failed" || connectionRef.current === "disconnected") {

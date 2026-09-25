@@ -367,3 +367,32 @@ before speech scheduling, but default preemptive generation can begin LLM work
 before the callback returns. Stage 2B.3 must explicitly gate that path before
 using the callback as a persist-before-generation boundary. No agent behavior
 has been modified in Stage 2B.1.
+
+## 2026-09-25 — M4 Stage 2B.2 participant gateway
+
+Keep researcher authorization on the existing RLS client. Use the separate
+server-only elevated client only after study/member checks to insert invitation
+metadata and call the Stage 2B.1 claim/resume RPCs. An invitation GET is passive;
+the participant explicitly consents to transcript storage in a POST. The resume
+capability is a distinct random bearer held only in an HTTP-only cookie, while
+the database stores its hash and controls expiry/revocation. The continuing URL
+contains no invitation or resume token.
+
+Real LiveKit tokens derive room and participant identity from the resolved
+database conversation. The browser cannot choose either. The demo token path
+is limited to demo rooms. A successful connection sets a separate HTTP-only
+joined marker to avoid replaying the opening on refresh. This stage leaves the
+agent, canonical transcript persistence, visual evidence writes, and researcher
+evidence reads unchanged. Stage 2B.3 must gate preemptive LiveKit generation
+until canonical participant transcript persistence has completed.
+
+HTTP acceptance against the linked Qalvi project passed with temporary study
+fixtures that were deleted afterward. No WebRTC agent conversation or canonical
+transcript write was claimed as validated in Stage 2B.2.
+
+Use only a server-side `sb_secret_` key for elevated gateway access and reject
+legacy JWTs under that variable. Do not attach researcher cookies to this client.
+Disabling the legacy API keys is a separate dashboard operation after all
+application paths have passed with publishable/secret keys. Cancellation stops
+new application access, but existing LiveKit connections and unexpired issued
+tokens still need terminal-session removal in Stage 2B.3/2B.4.

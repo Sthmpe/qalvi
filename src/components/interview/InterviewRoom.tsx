@@ -10,9 +10,9 @@ import type { InputMode } from "./types";
 import ParticipantHeader from "./ParticipantHeader";
 import "./participant.css";
 
-export default function InterviewRoom() {
+export default function InterviewRoom({ tokenEndpoint }: { tokenEndpoint?: string } = {}) {
   const [mode, setMode] = useState<InputMode>("voice");
-  const liveKit = useLiveKitSession();
+  const liveKit = useLiveKitSession(tokenEndpoint);
   const started = liveKit.isActive || liveKit.status === "connecting";
   const connected = liveKit.connection === "connected" && liveKit.agentReady;
 

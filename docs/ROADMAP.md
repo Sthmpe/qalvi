@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 has not started.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 has not started.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -145,9 +145,29 @@ dry-run listed only `20260924000100_live_interview_foundation.sql`; it was then
 applied to the linked Qalvi project. Linked migration history, schema lint,
 anonymous-access denials, and regenerated TypeScript types were verified.
 
-Stage 2B.2 and later (not started): participant/server APIs, real LiveKit token
-issuance, agent evidence writing, browser recovery, and real researcher evidence reads.
-The demo and researcher fixtures remain unchanged; no real interview is saved yet.
+Stage 2B.2 gateway: authenticated researchers can issue a seven-day, single-use
+invitation for an active study visible through their own RLS session. A participant
+opens the link without consuming it, explicitly agrees to transcript storage,
+then POSTs to claim it. The server sets a separate 24-hour HTTP-only resume
+cookie and issues short-lived LiveKit access from the saved conversation, never
+from browser-supplied room, identity, or tenancy IDs. The demo remains separate.
+The researcher study library retains sample fixtures; a small connected-study
+panel exposes invitation issuance only when an active real study exists.
+An isolated linked-project acceptance fixture passed authenticated issuance,
+draft/foreign/signed-out denial, passive invitation GET, consent, single claim,
+hashed resume, refresh, server-derived token scope, reuse/forgery rejection, and
+cancellation. The fixture was removed. A WebRTC agent conversation was not run
+for this gateway-only stage.
+Cancellation blocks new Qalvi session access but does not yet remove a connected
+LiveKit participant or invalidate an already issued five-minute token. Address
+this with the real-session lifecycle in Stage 2B.3/2B.4.
+
+Stage 2B.3 and later (not started): agent canonical transcript writes, visual
+response persistence integration, browser transcript reconstruction, and real
+researcher evidence reads. No real interview transcript is saved yet. Before
+LLM response generation, Stage 2B.3 must durably commit canonical participant
+transcripts and gate LiveKit's default preemptive generation so it cannot race
+ahead of that commit.
 
 Store:
 - studies

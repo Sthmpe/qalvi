@@ -4,11 +4,11 @@ import { AccessToken } from "livekit-server-sdk";
 /**
  * Mints a short-lived LiveKit room-join token for the participant browser.
  *
- * This is the ONLY place LiveKit credentials are touched — LIVEKIT_API_KEY
- * and LIVEKIT_API_SECRET never leave the server (AGENTS.md rule 15).
+ * LiveKit credentials remain server-side here and in the real interview token
+ * route. LIVEKIT_API_SECRET never reaches a browser (AGENTS.md rule 15).
  *
- * Milestone 2 proof-of-concept: any caller gets a token for a fresh,
- * randomly-named room. There is no study/auth model yet (Milestone 4/5).
+ * Public demo only. Real interviews use /interview/api/token, which resolves
+ * a server-side conversation from a secure resume cookie.
  */
 export async function POST(request: NextRequest) {
   const apiKey = process.env.LIVEKIT_API_KEY;
@@ -23,9 +23,10 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json().catch(() => ({}));
-  const roomName = typeof body.roomName === "string" ? body.roomName : `qalvi-demo-${Date.now()}`;
-  const identity =
-    typeof body.identity === "string" ? body.identity : `participant-${Date.now()}`;
+  const roomName = typeof body.roomName === "string" && /^qalvi-demo-[0-9a-f-]{36}$/.test(body.roomName)
+    ? body.roomName : `qalvi-demo-${crypto.randomUUID()}`;
+  const identity = typeof body.identity === "string" && /^participant-[0-9a-f-]{36}$/.test(body.identity)
+    ? body.identity : `participant-${crypto.randomUUID()}`;
 
   const token = new AccessToken(apiKey, apiSecret, {
     identity,

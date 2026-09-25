@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test tests/interview.test.mjs tests/visuals.test.mjs tests/database.test.mjs"
+    "test": "node --test tests/interview.test.mjs tests/visuals.test.mjs tests/database.test.mjs tests/gateway.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

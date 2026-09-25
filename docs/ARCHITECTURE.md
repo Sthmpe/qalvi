@@ -393,6 +393,48 @@ earlier (`agent/.venv/Lib/site-packages/livekit/agents/voice/agent_activity.py`,
 persisted sessions before claiming that database commit precedes LLM generation.
 This finding is documentation only; the agent has not been changed.
 
+### Stage 2B.2 participant gateway
+
+The signed-in researcher issues an invitation through a same-origin server POST.
+The study and membership are read with the researcher's RLS client; only the
+derived study/workspace and a server-generated token hash reach the separate
+server-only elevated client. The invitation plaintext is returned once. Sample
+researcher fixtures do not become real studies.
+
+The invitation GET reads the study title and description for informed consent
+without claiming the capability. A participant must check explicit transcript
+consent and submit a POST. The Stage 2B.1 claim RPC atomically creates one
+pseudonymous participant, pending conversation, and separate hashed resume
+capability. Its plaintext exists only in an HTTP-only, SameSite=Lax cookie scoped
+to `/interview`, Secure in production, for no more than 24 hours. The claim
+redirects to `/interview/session`, removing the invitation token from the active
+URL. Invitation and session pages use a no-referrer policy.
+
+The real LiveKit token route resolves the conversation from that cookie on
+every request. It ignores browser-supplied room, identity, workspace, study, or
+conversation fields and grants only microphone publication, data publication,
+and subscription for the stored room. The identity derives from the saved
+participant. Tokens last five minutes. A separate HTTP-only joined marker is
+set after a successful room connection, so refreshes request resume behavior
+without browser-selected room or identity. The public demo token route is
+restricted to `qalvi-demo-*` rooms and remains separate.
+
+Stage 2B.2 HTTP acceptance used an isolated temporary workspace in the linked
+project, an authenticated researcher session, and the local production app.
+It verified issuance, tenancy denial, consent, single claim, refresh, token
+scope, reuse rejection, and cancellation, then removed the fixture. It did not
+validate a WebRTC agent conversation or saved transcript.
+
+Stage 2B.2 does not write transcript turns or change the agent. Stage 2B.3 must
+commit each canonical participant transcript before LLM generation; LiveKit's
+default preemptive generation must be disabled or gated for persisted sessions.
+
+Cancellation currently closes application-level resume and token issuance, but
+does not remove an already-connected participant from LiveKit. A previously
+issued five-minute token may also permit reconnection until it expires. The
+LiveKit lifecycle work in Stage 2B.3/2B.4 must remove the active participant
+and prevent continued room use when a conversation becomes terminal.
+
 ### Integrity rules
 
 These are triggers and constraints, so they bind the service role too:
