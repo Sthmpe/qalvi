@@ -33,16 +33,29 @@ class Signals:
     ambiguous: bool = False         # wording that must not be read as a specific answer
 
     @classmethod
-    def parse(cls, text: str, known_topics: tuple[str, ...] = ()) -> "Signals":
+    def parse(cls, text: str, known_topics: tuple[str, ...] = (), *, strict: bool = False) -> "Signals":
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
+            if strict:
+                raise ValueError("No structured control classification")
             return cls()
         try:
             data = json.loads(match.group(0))
         except ValueError:
+            if strict:
+                raise
             return cls()
         if not isinstance(data, dict):
+            if strict:
+                raise ValueError("Invalid control classification")
             return cls()
+        if strict and (data.get("intent") not in INTENTS or
+                       data.get("engagement") not in ENGAGEMENT or
+                       not isinstance(data.get("covered"), list) or
+                       not isinstance(data.get("partial"), list) or
+                       not isinstance(data.get("probe"), (bool, type(None))) or
+                       not isinstance(data.get("ambiguous"), bool)):
+            raise ValueError("Incomplete control classification")
         intent = data.get("intent")
         engagement = data.get("engagement")
         probe = data.get("probe")
@@ -111,7 +124,7 @@ def classifier_input(recent: list[Exchange], latest: str, topics: list[Topic], o
 
 
 async def classify(model, recent: list[Exchange], latest: str, topics: list[Topic],
-                   on_screen: str | None, timeout: float = 2.0) -> Signals:
+                   on_screen: str | None, timeout: float = 2.0, *, strict: bool = False) -> Signals:
     """Ask the model for signals; fall back to neutral on any error or timeout."""
     from livekit.agents import llm
 
@@ -128,6 +141,9 @@ async def classify(model, recent: list[Exchange], latest: str, topics: list[Topi
         return text
 
     try:
-        return Signals.parse(await asyncio.wait_for(run(), timeout), tuple(topic.key for topic in topics))
+        return Signals.parse(await asyncio.wait_for(run(), timeout), tuple(topic.key for topic in topics),
+                             strict=strict)
     except Exception:
+        if strict:
+            raise
         return Signals()

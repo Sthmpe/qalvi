@@ -9,6 +9,16 @@ EVIDENCE_TOPIC = "qalvi.evidence"
 
 
 async def handle_text_input(sess, event, agent, writer, room, real_identity):
+    # A typed stream and a completed voice turn may arrive concurrently. The
+    # SDK's _claim_user_turn tracks activity but is not a mutual exclusion lock.
+    lock = getattr(agent, "_turn_lock", None) if writer else None
+    if lock:
+        async with lock:
+            return await _handle_claimed_text_input(sess, event, agent, writer, room, real_identity)
+    return await _handle_claimed_text_input(sess, event, agent, writer, room, real_identity)
+
+
+async def _handle_claimed_text_input(sess, event, agent, writer, room, real_identity):
     async with sess._claim_user_turn():
         if writer:
             if agent._paused or not event.info or not event.participant or \
@@ -58,7 +68,11 @@ async def handle_text_input(sess, event, agent, writer, room, real_identity):
                 marker("text", saved.sequence)
         else:
             await sess.interrupt()
-        guidance = await agent.present(event.text)
+        try:
+            guidance = await agent.present(event.text, saved if writer else None)
+        except EvidenceError:
+            await agent.pause_evidence()
+            return
         if guidance:
             sess.generate_reply(user_input=event.text, instructions=guidance)
         else:

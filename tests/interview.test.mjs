@@ -22,6 +22,7 @@ function load(file, dependencies = {}, globals = {}) {
 const transcript = load("../src/components/interview/transcription.ts");
 const { upsertTranscript, readTranscript, transcriptId } = transcript;
 const display = load("../src/components/interview/visuals/display.ts");
+const recovery = load("../src/components/interview/recovery.ts");
 
 function reader(streamId, segment, chunks, final = "false", trailer) {
   return {
@@ -71,13 +72,15 @@ test("stream ID is the fallback, never transcript text", async () => {
   assert.equal(messages[0].id, transcriptId("user", "stream-a"));
 });
 
-function sessionHarness(tokenEndpoint) {
+function sessionHarness(tokenEndpoint, seedMessages = []) {
   const slots = [];
   let cursor = 0;
   const rooms = [];
   const requests = [];
   let now = 0;
   const intervals = new Map();
+  const canonical = [...seedMessages];
+  const tabStorage = new Map();
   let timerId = 0;
   class Room {
     constructor() {
@@ -101,7 +104,17 @@ function sessionHarness(tokenEndpoint) {
       assert.ok(["lk.transcription", "qalvi.display", "qalvi.evidence"].includes(topic), `Unexpected topic ${topic}`);
       if (topic === "lk.transcription") this.transcription = handler;
       else if (topic === "qalvi.display") this.display = handler;
-      else this.evidence = handler;
+      else this.evidence = async (reader, participant) => {
+        const raw = await reader.readAll();
+        const ack = JSON.parse(raw);
+        if (ack.status === "saved" && !canonical.some((m) => m.eventKey === `text:${ack.eventId}`)) {
+          const sent = this.localParticipant.sent.find((m) => m.options.attributes?.["qalvi.event_id"] === ack.eventId);
+          canonical.push({ id: `saved-${ack.eventId}`, sequence: canonical.length,
+            speaker: "participant", channel: "text", content: sent?.text ?? "", eventKey: `text:${ack.eventId}`,
+            interrupted: false, protocolVersion: 1 });
+        }
+        return handler({ readAll: async () => raw }, participant);
+      };
     }
     async startAudio() {}
     async connect() { if (this.failConnect) throw new Error("offline"); this.engine.isClosed = false; this.state = "connected"; }
@@ -126,16 +139,54 @@ function sessionHarness(tokenEndpoint) {
   // The test harness supplies hook storage; no React renderer is involved.
   const { useLiveKitSession: runHook } = load("../src/components/interview/useLiveKitSession.ts", {
     react, "./transcription": transcript, "./visuals/display": display, "./sessionHealth": health,
+    "./recovery": recovery,
     "livekit-client": livekit,
   }, {
     performance, crypto, console, setTimeout, clearTimeout, AbortSignal, process: { env: { NODE_ENV: "test" } },
     Date: class extends Date { static now() { return now; } },
     setInterval: (fn) => { const id = ++timerId; intervals.set(id, fn); return id; },
     clearInterval: (id) => intervals.delete(id),
-    fetch: async (_, options) => { requests.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ serverUrl: "mock", token: "mock" }) }; },
+    sessionStorage: { getItem: (key) => tabStorage.get(key) ?? null,
+      setItem: (key, value) => tabStorage.set(key, value), removeItem: (key) => tabStorage.delete(key) },
+    fetch: async (url, options) => {
+      if (url.startsWith("/interview/api/state")) {
+        const after = Number(new URL(url, "http://localhost").searchParams.get("afterSequence"));
+        const messages = canonical.filter((m) => m.sequence > after);
+        return { ok: true, json: async () => ({ status: "in_progress", sessionKey: "session-1", messages,
+          nextCursor: messages.at(-1)?.sequence ?? after, hasMore: false, replyUnconfirmed: false,
+          controlPending: false, legacyHistory: false }) };
+      }
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ serverUrl: "mock", token: "mock" }) };
+    },
   });
-  return { rooms, requests, tick: (ms = 1000) => { now += ms; for (const fn of intervals.values()) fn(); }, render: () => { cursor = 0; return runHook(tokenEndpoint); } };
+  const initialRecovery = tokenEndpoint ? { status: "pending", sessionKey: "session-1", messages: seedMessages,
+    nextCursor: seedMessages.at(-1)?.sequence ?? -1, hasMore: false, replyUnconfirmed: false,
+    controlPending: false, legacyHistory: false } : undefined;
+  return { rooms, requests, canonical, tabStorage,
+    tick: (ms = 1000) => { now += ms; for (const fn of intervals.values()) fn(); },
+    render: () => { cursor = 0; return runHook(tokenEndpoint, initialRecovery); } };
 }
+
+test("real refresh starts from canonical rows and keeps live captions separate", async () => {
+  const saved = { id: "database-1", sequence: 0, speaker: "interviewer", channel: "voice",
+    content: "What would you like to improve?", eventKey: "assistant:opening", interrupted: false };
+  const h = sessionHarness("/interview/api/token", [saved]);
+  same(h.render().messages.map((message) => message.id), ["database-1"]);
+  await h.render().start("text");
+  const room = h.rooms[0];
+  await room.transcription(reader("live", "one", ["A draft caption"]), { identity: "user" });
+  same(h.render().messages.map((message) => message.id), ["database-1"]);
+  assert.equal(h.render().provisional.text, "A draft caption");
+  h.canonical.push({ id: "database-2", sequence: 1, speaker: "participant", channel: "voice",
+    content: "A saved answer", eventKey: "voice:one", interrupted: false });
+  room.handlers.get("Reconnected")();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  same(h.render().messages.map((message) => message.id), ["database-1", "database-2"]);
+  room.handlers.get("Reconnected")();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.render().messages.length, 2);
+});
 
 test("real typed input waits for durable evidence ack and reuses its event ID on retry", async () => {
   const h = sessionHarness("/interview/api/token");

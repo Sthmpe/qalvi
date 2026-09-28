@@ -5,7 +5,6 @@ import type { Database } from "@/types/database";
 import { createSupabaseSecretClient } from "@/lib/supabase/secret";
 
 export const RESUME_COOKIE = "qalvi_interview_resume";
-export const JOINED_COOKIE = "qalvi_interview_joined";
 export const CONSENT_VERSION = "transcript-v1";
 export const RESUME_SECONDS = 24 * 60 * 60;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -26,7 +25,13 @@ export function validCapability(token: unknown): token is string {
 
 export function sameOrigin(request: Request) {
   const origin = request.headers.get("origin");
-  return !!origin && origin === new URL(request.url).origin;
+  if (origin === new URL(request.url).origin) return true;
+  // Referrer-Policy: no-referrer can make a same-origin form POST carry an
+  // opaque Origin. Browser-controlled Fetch Metadata still proves its source.
+  return origin === "null" &&
+    request.headers.get("sec-fetch-site") === "same-origin" &&
+    request.headers.get("sec-fetch-mode") === "navigate" &&
+    request.headers.get("sec-fetch-dest") === "document";
 }
 
 export function participantCookieOptions() {
@@ -96,7 +101,7 @@ export async function resolveParticipant(token: unknown, admin?: Client) {
   });
   if (error || !id) return null;
   const { data: conversation, error: readError } = await elevated.from("conversations")
-    .select("id, participant_id, study_id, workspace_id, livekit_room, status")
+    .select("id, participant_id, study_id, workspace_id, livekit_room, status, writer_generation")
     .eq("id", id).maybeSingle();
   if (readError || !conversation?.livekit_room || !["pending", "in_progress", "interrupted"].includes(conversation.status)) return null;
   return conversation;

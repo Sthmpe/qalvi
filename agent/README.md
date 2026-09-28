@@ -94,6 +94,13 @@ participant input receives a `qalvi.evidence` acknowledgement only after the
 database confirms the write. The demo rooms retain their original behavior and
 do not write evidence. Microphone audio is not recorded.
 
+Stage 2B.4A real turns use the recoverable append RPC, then persist a versioned
+derived conductor decision before the reply model runs. If either acknowledgement
+fails, the agent pauses rather than generating an unsaved or unsupported reply.
+`recovery.py` can verify conductor replay from canonical participant messages
+and their control records without running classification again. It is not yet
+wired into replacement-worker startup; that remains Stage 2B.4B.
+
 ## Development latency diagnostics
 
 Run the frontend with `npm run dev`. Agent timing logs are enabled by

@@ -3,9 +3,10 @@ import type { TranscriptMessage } from "./types";
 
 interface TranscriptProps {
   messages: TranscriptMessage[];
+  provisional?: TranscriptMessage | null;
 }
 
-export default function Transcript({ messages }: TranscriptProps) {
+export default function Transcript({ messages, provisional }: TranscriptProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
 
@@ -14,14 +15,14 @@ export default function Transcript({ messages }: TranscriptProps) {
     if (container && following.current) {
       container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
     }
-  }, [messages]);
+  }, [messages, provisional]);
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !provisional) {
     return (
       <div className="transcript-empty">
         <span aria-hidden="true">“</span>
-        <p>A good conversation starts with you.</p>
-        <small>Your words and Qalvi’s questions will appear here.</small>
+        <p>Qalvi will begin the conversation.</p>
+        <small>Your words and Qalvi&apos;s questions will appear here.</small>
       </div>
     );
   }
@@ -47,6 +48,10 @@ export default function Transcript({ messages }: TranscriptProps) {
           </div>
         </div>
       ))}
+      {provisional && <div className="transcript-message provisional" aria-busy="true">
+        <div><div className="transcript-attribution"><strong>{provisional.speaker === "ai" ? "Qalvi" : "You"}</strong><span>Live caption, saving</span></div>
+          <p>{provisional.text}</p></div>
+      </div>}
     </div>
   );
 }

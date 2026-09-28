@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken, TrackSource } from "livekit-server-sdk";
-import { JOINED_COOKIE, RESUME_COOKIE, resolveParticipant, sameOrigin } from "@/lib/interview/gateway";
+import { RESUME_COOKIE, resolveParticipant, sameOrigin } from "@/lib/interview/gateway";
 
 export async function POST(request: NextRequest) {
   if (!sameOrigin(request)) return NextResponse.json({ error: "Invalid request origin." }, { status: 403 });
@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   const identity = `participant-${session.participant_id}`;
   const token = new AccessToken(apiKey, apiSecret, {
     identity, ttl: "5m",
-    attributes: { "qalvi.resume": request.cookies.get(JOINED_COOKIE)?.value === "1" ? "true" : "false" },
+    attributes: { "qalvi.resume": session.writer_generation > 0 ? "true" : "false" },
   });
   token.addGrant({
     roomJoin: true, room: session.livekit_room!,

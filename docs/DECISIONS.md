@@ -431,3 +431,37 @@ failure injection confirmed that a failed append pauses without LLM advancement
 and that a lost-acknowledgement retry returns the existing message. Cancellation
 ejection, replacement-agent history reconstruction, visual evidence, and
 researcher live reads remain outside Stage 2B.3.
+
+## 2026-09-27 — M4 Stage 2B.4A recovery foundation
+
+Mark new canonical voice/text participant messages with protocol version 1.
+After canonical database acknowledgement, classify the turn, advance the
+conductor, and durably record one immutable versioned control decision keyed to
+that exact message. Only then may the agent generate a reply. A missing control
+record therefore identifies a turn for which reply generation must not have
+started. Same-decision retry is idempotent; conflicting retry is rejected.
+Legacy unmarked turns remain explicit and are not treated as replay-safe.
+
+A service-only database function resolves a hashed, valid resume capability to
+one bounded sequence-ordered transcript page. The participant route exposes
+only whitelisted message fields and recovery flags, never control metadata or
+tenant IDs. Terminal conversations may be read with an unexpired resume cookie
+but cannot obtain writable LiveKit tokens. Browser final messages come from
+canonical rows; LiveKit captions are provisional. An uncertain typed draft is
+tab-scoped, retains its event ID and payload, and is never resent automatically.
+The browser joined marker no longer decides whether an opening is fresh; the
+agent uses its database-claimed writer generation. The token's resume hint is
+derived from durable state for compatibility, but does not override the writer.
+The replay module is intentionally not
+wired to replacement Cloud worker startup. That, generation takeover,
+heartbeat/lease cleanup, cancellation ejection and human-device acceptance
+remain Stage 2B.4B.
+
+Stage 2B.4A linked migration and type generation are complete, but live browser
+acceptance remains open. The controlled browser test reached consent and a
+server-derived participant room. LiveKit reported automatic dispatch, while
+the deployed worker did not join, including after a restart and a fresh
+deployment. Do not infer voice/text recovery acceptance from the local tests.
+The consent POST origin check accepts an opaque `Origin` only when browser-owned
+Fetch Metadata proves a same-origin document navigation; cross-site and missing
+metadata remain denied. This preserves the invitation page's no-referrer policy.

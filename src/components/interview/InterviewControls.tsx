@@ -13,11 +13,18 @@ interface InterviewControlsProps {
   onToggleMode: () => void;
   onMicTap: () => void;
   onSendText: (text: string) => Promise<boolean>;
+  draft?: string;
+  onDraftChange?: (text: string) => void;
+  draftLocked?: boolean;
+  onDiscardDraft?: () => void;
 }
 
 export default function InterviewControls({ started, status, mode, connected, micEnabled,
-  micBusy, sending, onStart, onToggleMode, onMicTap, onSendText }: InterviewControlsProps) {
-  const [draft, setDraft] = useState("");
+  micBusy, sending, onStart, onToggleMode, onMicTap, onSendText,
+  draft: controlledDraft, onDraftChange, draftLocked = false, onDiscardDraft }: InterviewControlsProps) {
+  const [localDraft, setLocalDraft] = useState("");
+  const draft = controlledDraft ?? localDraft;
+  const setDraft = onDraftChange ?? setLocalDraft;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const submitting = useRef(false);
   const hasText = !!draft.trim();
@@ -37,7 +44,11 @@ export default function InterviewControls({ started, status, mode, connected, mi
     submitting.current = true;
     try {
       if (await onSendText(submitted.trim())) {
-        setDraft((current) => current === submitted ? "" : current);
+        if (onDraftChange) {
+          if (draft === submitted) onDraftChange("");
+        } else {
+          setLocalDraft((current) => current === submitted ? "" : current);
+        }
       }
     } finally { submitting.current = false; }
   }
@@ -55,7 +66,7 @@ export default function InterviewControls({ started, status, mode, connected, mi
       <form className={`participant-composer ${listening ? "is-listening" : ""}`} onSubmit={handleSubmit}>
         <textarea ref={textarea} rows={1} aria-label="Your response" aria-describedby="composer-help"
           value={draft} placeholder="Share your thoughts…"
-          onChange={(event) => setDraft(event.target.value)}
+          readOnly={draftLocked} onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             const mobileReturn = window.matchMedia("(pointer: coarse)").matches && !event.ctrlKey && !event.metaKey;
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !mobileReturn) {
@@ -80,6 +91,10 @@ export default function InterviewControls({ started, status, mode, connected, mi
           {mode === "voice" ? "Type instead" : "Use voice"}
         </button>
       </div>
+      {draftLocked && <div className="composer-footer" role="status">
+        <span>Delivery was not confirmed. Retry this answer or discard it.</span>
+        <button type="button" onClick={onDiscardDraft}>Discard draft</button>
+      </div>}
     </div>
   );
 }

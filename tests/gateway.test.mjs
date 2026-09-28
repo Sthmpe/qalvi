@@ -24,6 +24,20 @@ const gateway = load("../src/lib/interview/gateway.ts", {
   "@/lib/supabase/secret": { createSupabaseSecretClient: () => { throw Error("Unexpected admin client"); } },
 });
 
+test("consent form accepts opaque Origin only with same-origin navigation metadata", () => {
+  const url = "http://localhost:3101/interview/api/claim";
+  const request = (headers) => new Request(url, { method: "POST", headers });
+  assert.equal(gateway.sameOrigin(request({ origin: "http://localhost:3101" })), true);
+  assert.equal(gateway.sameOrigin(request({ origin: "https://attacker.example" })), false);
+  assert.equal(gateway.sameOrigin(request({ origin: "null" })), false);
+  assert.equal(gateway.sameOrigin(request({ origin: "null", "sec-fetch-site": "cross-site",
+    "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" })), false);
+  assert.equal(gateway.sameOrigin(request({ origin: "null", "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors", "sec-fetch-dest": "empty" })), false);
+  assert.equal(gateway.sameOrigin(request({ origin: "null", "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" })), true);
+});
+
 test("privileged Supabase client requires a secret key and never uses researcher cookies", () => {
   const calls = [];
   const dependencies = {
@@ -133,6 +147,25 @@ test("resume lookup cannot select another conversation and refuses unknown capab
   assert.equal(options.path, "/interview");
 });
 
+test("recovery helper hashes the capability and uses only the scoped privileged RPC", async () => {
+  const calls = [];
+  const token = gateway.newCapability();
+  const recovery = load("../src/lib/interview/recovery.ts", {
+    "server-only": {},
+    "./gateway": gateway,
+    "@/lib/supabase/secret": { createSupabaseSecretClient: () => ({
+      async rpc(name, args) { calls.push([name, args]); return { data: { sessionKey: "one", messages: [] }, error: null }; },
+    }) },
+  });
+  assert.equal(await recovery.readParticipantRecovery("forged"), null);
+  await recovery.readParticipantRecovery(token, 5, 10);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "read_participant_interview_recovery");
+  assert.equal(calls[0][1].p_resume_hash, gateway.capabilityHash(token));
+  assert.equal(calls[0][1].p_after_sequence, 5);
+  assert.equal(calls[0][1].p_limit, 10);
+});
+
 class FakeResponse {
   constructor(body, options = {}) {
     this.body = body;
@@ -194,20 +227,26 @@ test("researcher invitation route rejects signed-out requests before privileged 
   assert.equal(issued, false);
 });
 
-test("joined marker is set only for an authorized same-origin participant session", async () => {
-  const { POST } = load("../src/app/interview/api/joined/route.ts", {
+test("recovery route is cookie-scoped, no-store and refuses invalid capabilities", async () => {
+  const seen = [];
+  const { GET } = load("../src/app/interview/api/state/route.ts", {
     "next/server": { NextResponse: FakeResponse },
-    "@/lib/interview/gateway": { ...gateway,
-      resolveParticipant: async (token) => token === "valid" ? { id: "conversation-1" } : null },
+    "@/lib/interview/gateway": { RESUME_COOKIE: gateway.RESUME_COOKIE },
+    "@/lib/interview/recovery": { readParticipantRecovery: async (token, after) => {
+      seen.push([token, after]);
+      return token === "valid" ? { status: "completed", messages: [], sessionKey: "one" } : null;
+    } },
   });
-  const none = await POST(request("http://localhost:3000/interview/api/joined"));
-  assert.equal(none.status, 401);
-  const joined = await POST(request("http://localhost:3000/interview/api/joined", {
-    cookie: { [gateway.RESUME_COOKIE]: "valid" },
-  }));
-  assert.equal(joined.status, 204);
-  assert.equal(joined.cookies.values.get(gateway.JOINED_COOKIE).value, "1");
-  assert.equal(joined.cookies.values.get(gateway.JOINED_COOKIE).options.httpOnly, true);
+  const make = (value, afterSequence) => ({
+    cookies: { get: () => value ? { value } : undefined },
+    nextUrl: { searchParams: new URLSearchParams(afterSequence === undefined ? "" : `afterSequence=${afterSequence}`) },
+  });
+  assert.equal((await GET(make("forged"))).status, 401);
+  assert.equal((await GET(make("valid", "-2"))).status, 400);
+  const allowed = await GET(make("valid", "4"));
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.headers.get("Cache-Control"), "private, no-store");
+  assert.deepEqual(seen.at(-1), ["valid", 4]);
 });
 
 test("real LiveKit token ignores browser-chosen scope and refuses a missing resume", async () => {
@@ -221,8 +260,9 @@ test("real LiveKit token ignores browser-chosen scope and refuses a missing resu
     "next/server": { NextResponse: FakeResponse },
     "livekit-server-sdk": { AccessToken: FakeAccessToken, TrackSource: { MICROPHONE: 2 } },
     "@/lib/interview/gateway": { ...gateway,
-      resolveParticipant: async (token) => token === "valid" ? {
+      resolveParticipant: async (token) => token === "valid" || token === "resumed" ? {
         participant_id: "p-1", livekit_room: "qalvi-real-from-db", status: "pending",
+        writer_generation: token === "resumed" ? 2 : 0,
       } : null },
   });
   const previous = [process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, process.env.LIVEKIT_URL];
@@ -233,13 +273,17 @@ test("real LiveKit token ignores browser-chosen scope and refuses a missing resu
     const denied = await POST(request("http://localhost:3000/interview/api/token"));
     assert.equal(denied.status, 401);
     const allowed = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
-      [gateway.RESUME_COOKIE]: "valid", [gateway.JOINED_COOKIE]: "1",
+      [gateway.RESUME_COOKIE]: "valid",
     }, body: { roomName: "attacker-room", identity: "attacker" } }));
     assert.equal(allowed.status, 200);
     assert.equal(calls[0].grant.room, "qalvi-real-from-db");
     assert.equal(calls[0].options.identity, "participant-p-1");
     assert.equal(calls[0].options.ttl, "5m");
-    assert.equal(calls[0].options.attributes["qalvi.resume"], "true");
+    assert.equal(calls[0].options.attributes["qalvi.resume"], "false");
+    await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "resumed",
+    } }));
+    assert.equal(calls[1].options.attributes["qalvi.resume"], "true");
     assert.equal(calls[0].grant.canPublishSources.length, 1);
     assert.ok(!JSON.stringify(allowed.body).includes("test-secret"));
   } finally {

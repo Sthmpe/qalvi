@@ -110,13 +110,17 @@ class EvidenceWriter:
                 raise EvidenceError("Conflicting evidence event key")
             if key in self._saved:
                 return self._saved[key]
+            recoverable = speaker == "participant"
             args = {"p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
-                    "p_event_key": key, "p_speaker": speaker, "p_channel": channel,
-                    "p_content": content, "p_occurred_at": timestamp, "p_interrupted": interrupted}
+                    "p_event_key": key, "p_channel": channel,
+                    "p_content": content, "p_occurred_at": timestamp}
+            if not recoverable:
+                args.update({"p_speaker": speaker, "p_interrupted": interrupted})
             uncertain = False
             for attempt in range(3):
                 try:
-                    rows = await self.api.rpc("append_interview_message", args)
+                    rows = await self.api.rpc("append_recoverable_interview_message" if recoverable
+                                              else "append_interview_message", args)
                     if not isinstance(rows, list) or len(rows) != 1:
                         raise EvidenceError("Evidence acknowledgement malformed")
                     row = rows[0]
@@ -132,6 +136,29 @@ class EvidenceWriter:
                     uncertain = True
                     await asyncio.sleep(0.2 * (attempt + 1))
             raise EvidenceError("Evidence acknowledgement unavailable")
+
+    async def record_control(self, message_id: str, control: dict) -> None:
+        if control.get("schema_version") != 1 or control.get("methodology_version") != "real-default-v1":
+            raise EvidenceError("Unsupported recovery control protocol")
+        payload = {
+            "p_conversation_id": self.conversation_id,
+            "p_writer_generation": self.generation,
+            "p_message_id": message_id,
+            "p_signals": control["signals"],
+            "p_decision_action": control["decision_action"],
+            "p_state_sha256": control["state_sha256"],
+            "p_methodology_version": control["methodology_version"],
+        }
+        for attempt in range(3):
+            try:
+                result = await self.api.rpc("record_interview_turn_control", payload)
+                if result != message_id:
+                    raise EvidenceError("Control acknowledgement malformed")
+                return
+            except EvidenceError as exc:
+                if attempt == 2 or not exc.retryable:
+                    raise
+                await asyncio.sleep(0.2 * (attempt + 1))
 
     async def interrupt(self) -> None:
         try:

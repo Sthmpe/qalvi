@@ -187,14 +187,25 @@ LLM, while retrying a lost acknowledgement resolves to the existing row.
 Temporary acceptance fixtures were removed. A longer audio sample split into
 two distinct final STT turns, so turn segmentation remains dependent on VAD/STT.
 
-Stage 2B.4 and later (not started): visual display/response persistence,
-browser transcript reconstruction and full reconnect recovery, and real
-researcher evidence reads. No findings generation or analytics are included.
-Human microphone/browser-device acceptance remains unperformed. A replacement
-agent cannot yet reconstruct transcript or interview context; browser transcript
-reconstruction and reconnect recovery are also outstanding. Visual display and
-response persistence is not yet integrated. Cancellation does not yet eject an
-already-connected LiveKit participant.
+Stage 2B.4A implementation in review: version-marked participant turns,
+one immutable derived control record per processed turn, a service-only resume
+recovery read, and browser reconstruction from canonical database sequence.
+The real agent must acknowledge both the participant message and its control
+decision before reply generation. An uncertain typed draft keeps its stable
+event ID in tab-scoped storage and requires explicit retry. The linked recovery
+migration is applied, generated types are refreshed, and local Node, Python,
+TypeScript, lint and production-build checks pass. Live browser acceptance is
+still open: a real invitation and consent produced one participant room and an
+automatic LiveKit dispatch, but the Cloud worker did not join that room during
+the controlled test. No voice/text evidence or refresh result is claimed from
+that stalled live run. The narrow same-origin consent-form compatibility fix is
+covered by a gateway regression test.
+
+Stage 2B.4B remains separate: replacement Cloud worker reconstruction and
+generation takeover, heartbeat/lease and stale-session cleanup, cancellation
+ejection/token revocation with durable retries, and human browser/microphone
+acceptance. Visual display/response persistence and researcher evidence reads
+remain later work. No findings generation or analytics are included.
 
 Store:
 - studies

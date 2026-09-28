@@ -16,6 +16,9 @@ class FakeAPI:
         self.fail_after_commit = False
         self.fail_before_commit = False
         self.generation = 2
+        self.controls = {}
+        self.fail_control = False
+        self.control_ack_lost = False
 
     async def request(self, method, path, body=None):
         if path.startswith("/conversations?"):
@@ -32,7 +35,17 @@ class FakeAPI:
             return self.generation
         if name == "transition_interview_conversation":
             return "interrupted"
-        if name != "append_interview_message":
+        if name == "record_interview_turn_control":
+            if self.fail_control:
+                raise EvidenceError("Control acknowledgement unavailable")
+            old = self.controls.setdefault(args["p_message_id"], args.copy())
+            if old != args:
+                raise EvidenceError("Conflicting control record")
+            if self.control_ack_lost:
+                self.control_ack_lost = False
+                raise EvidenceError("Control acknowledgement unavailable", retryable=True)
+            return args["p_message_id"]
+        if name not in ("append_interview_message", "append_recoverable_interview_message"):
             raise AssertionError(name)
         if args["p_writer_generation"] != self.generation:
             raise EvidenceError("Evidence database rejected the operation (403)")
@@ -55,6 +68,36 @@ class FakeAPI:
 
 
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_control_ack_is_required_before_reply_and_lost_ack_retries_same_decision(self):
+        api = FakeAPI()
+        writer = EvidenceWriter(api, "conversation-1", 2)
+        control = {"schema_version": 1, "methodology_version": "real-default-v1",
+                   "signals": {"intent": "continue", "engagement": "neutral", "covered": [],
+                               "partial": [], "probe": None, "ambiguous": False},
+                   "decision_action": "continue", "state_sha256": "a" * 64}
+        events = []
+
+        async def save():
+            result = await writer.append("voice:stable", "participant", "voice", "Hello", occurred_at())
+            events.append("canonical_ack")
+            return result
+
+        async def advance(saved):
+            await writer.record_control(saved.id, control)
+            events.append("control_ack")
+            events.append("reply_generation")
+
+        api.control_ack_lost = True
+        await persist_then_continue(save, advance)
+        self.assertEqual(events, ["canonical_ack", "control_ack", "reply_generation"])
+        self.assertEqual(len(api.controls), 1)
+        self.assertEqual(sum(name == "record_interview_turn_control" for name, _ in api.calls), 2)
+        api.fail_control = True
+        with self.assertRaises(EvidenceError):
+            await persist_then_continue(lambda: writer.append("voice:next", "participant", "voice",
+                                                              "Next", occurred_at()), advance)
+        self.assertEqual(events.count("reply_generation"), 1)
+
     async def test_room_mapping_and_writer_generation_are_server_derived(self):
         api = FakeAPI()
         room = "qalvi-real-00000000-0000-4000-8000-000000000001"
@@ -95,7 +138,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.sequence, 0)
         self.assertTrue(saved.inserted)  # this writer may advance after recovering its lost ack
         self.assertEqual(api.sequence, 1)
-        attempts = [args for name, args in api.calls if name == "append_interview_message"]
+        attempts = [args for name, args in api.calls if name == "append_recoverable_interview_message"]
         self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[0], attempts[1])
 
@@ -107,7 +150,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(EvidenceError):
             await writer.append("text:stream-2", "participant", "text", "Question", when)
         self.assertEqual(api.sequence, 0)
-        self.assertEqual(len([name for name, _ in api.calls if name == "append_interview_message"]), 3)
+        self.assertEqual(len([name for name, _ in api.calls if name == "append_recoverable_interview_message"]), 3)
         api.fail_before_commit = False
         api.generation = 3
         with self.assertRaises(EvidenceError):
@@ -116,6 +159,31 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_typed_turn_waits_for_shared_voice_control_lock(self):
+        class Claim:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_args): return False
+        lock = asyncio.Lock()
+        await lock.acquire()  # a spoken turn owns canonical append and control decision
+        session = SimpleNamespace(_claim_user_turn=lambda: Claim(), interrupt=AsyncMock(),
+                                  generate_reply=Mock())
+        writer = SimpleNamespace(append=AsyncMock(return_value=SimpleNamespace(
+            id="saved-typed", sequence=1, inserted=True)))
+        room = SimpleNamespace(local_participant=SimpleNamespace(send_text=AsyncMock()))
+        agent = SimpleNamespace(_turn_lock=lock, _paused=False, _advanced_turns=set(),
+                                flush_assistant=AsyncMock(), present=AsyncMock(return_value=None))
+        event = SimpleNamespace(text="Typed answer", participant=SimpleNamespace(identity="participant-p1"),
+                                info=SimpleNamespace(stream_id="stream-3", timestamp=1700000000000,
+                                                     attributes=None))
+        task = asyncio.create_task(handle_text_input(session, event, agent, writer, room, "participant-p1"))
+        await asyncio.sleep(0)
+        writer.append.assert_not_awaited()
+        lock.release()
+        await task
+        writer.append.assert_awaited_once()
+        agent.present.assert_awaited_once()
+        session.generate_reply.assert_called_once()
+
     async def test_generation_waits_for_ack_and_failed_write_prevents_advance(self):
         acknowledged = asyncio.Event()
         advanced = []

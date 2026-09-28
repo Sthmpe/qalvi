@@ -30,6 +30,15 @@ class OpeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await OpeningTurn().start(session, wait))
         session.generate_reply.assert_not_called()
 
+    async def test_durable_writer_generation_overrides_stale_browser_resume_marker(self):
+        session = SimpleNamespace(generate_reply=AsyncMock())
+        fresh_wait = AsyncMock(return_value=SimpleNamespace(attributes={"qalvi.resume": "true"}))
+        self.assertTrue(await OpeningTurn().start(session, fresh_wait, fresh=True))
+        session.generate_reply.assert_awaited_once()
+        resumed_wait = AsyncMock(return_value=SimpleNamespace(attributes={"qalvi.resume": "false"}))
+        self.assertFalse(await OpeningTurn().start(session, resumed_wait, fresh=False))
+        session.generate_reply.assert_awaited_once()
+
     async def test_overlapping_start_requests_cannot_duplicate_opening(self):
         session = SimpleNamespace(generate_reply=AsyncMock())
         wait = AsyncMock(return_value=SimpleNamespace(attributes={}))

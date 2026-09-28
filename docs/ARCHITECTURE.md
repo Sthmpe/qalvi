@@ -318,6 +318,32 @@ and Supabase's default grants revoked, so a partial rollout exposes nothing.
 | `20260923000200_evidence_integrity.sql` | Immutability, visual-answer validation, supporting-evidence rule, `updated_at`, profile creation |
 | `20260923000300_access_policies.sql` | Membership helpers, column grants, policies, `create_workspace`, `create_finding` |
 | `20260924000100_live_interview_foundation.sql` | Hashed invitation/resume capabilities, consent and lifecycle, writer fencing, ordered idempotent append RPCs, issued/rendered visual provenance |
+| `20260927000100_interview_recovery_foundation.sql` | New-protocol participant marker, immutable control decisions, scoped service-only recovery read (2B.4A) |
+
+Stage 2B.4A adds a recovery boundary for real interview rooms. The agent writes
+a version-1 canonical participant message, waits for its database
+acknowledgement, classifies the turn, advances the conductor and writes one
+immutable control decision keyed to that message. It waits for the control
+acknowledgement before reply generation. Control metadata is derived state,
+not participant evidence. Missing control on a versioned turn means a reply
+must not have begun; legacy unmarked turns cannot be replayed under that
+guarantee. A shared real-turn lock serializes typed and spoken callbacks across
+the append and control decision; the SDK's activity claim is not a mutex.
+The replay module can verify the saved signals and conductor state
+without calling the classifier, but is not used at worker startup yet.
+
+The participant recovery RPC accepts only the hash of an HTTP-only resume
+capability and returns bounded canonical transcript pages in database sequence
+with status and narrow recovery flags. It does not expose tenant IDs or control
+metadata. The real participant page loads these rows before connection, then
+fetches deltas after connection/reconnection and while active. Provisional
+LiveKit captions stay separate. A typed draft awaiting acknowledgement is kept
+only in tab storage with the same event ID and payload for explicit retry.
+Terminal conversations can be read until the resume expires or is revoked,
+while LiveKit token issuance remains restricted to writable statuses. The
+agent's claimed writer generation determines opening freshness, so a stale
+browser token hint cannot replay a greeting. A browser refresh never
+regenerates a missing assistant reply.
 
 ```
 auth.users 1-1 profiles
@@ -340,12 +366,13 @@ Participants are pseudonymous: an `alias` and an optional `segment`, no name or
 contact columns. They are not auth users and never sign in. The same person in
 two studies is two unlinked participants.
 
-JSONB is used in three places only, each because the shape genuinely varies:
+The original schema uses JSONB in three places because their shapes vary:
 `visual_displays.definition` (the display action exactly as issued, whose
 fields differ per visual type), `conversations.interviewer_metadata` (provider
-and model provenance), and `findings.ai_metadata`. Anything searched on is a
-relational column, and a check keeps `visual_displays` columns equal to their
-snapshot.
+and model provenance), and `findings.ai_metadata`. Stage 2B.4A also stores a
+tightly validated signals object for deterministic control replay. Anything
+searched on is a relational column, and a check keeps `visual_displays` columns
+equal to their snapshot.
 
 ### Visual answers
 

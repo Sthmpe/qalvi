@@ -8,11 +8,15 @@ import InterviewControls from "./InterviewControls";
 import { useLiveKitSession } from "./useLiveKitSession";
 import type { InputMode } from "./types";
 import ParticipantHeader from "./ParticipantHeader";
+import { terminalInterview, type RecoverySnapshot } from "./recovery";
 import "./participant.css";
 
-export default function InterviewRoom({ tokenEndpoint }: { tokenEndpoint?: string } = {}) {
+export default function InterviewRoom({ tokenEndpoint, initialRecovery, readOnly = false }: {
+  tokenEndpoint?: string; initialRecovery?: RecoverySnapshot; readOnly?: boolean
+} = {}) {
   const [mode, setMode] = useState<InputMode>("voice");
-  const liveKit = useLiveKitSession(tokenEndpoint);
+  const liveKit = useLiveKitSession(tokenEndpoint, initialRecovery);
+  const terminal = readOnly || terminalInterview(liveKit.recoveryStatus);
   const started = liveKit.isActive || liveKit.status === "connecting";
   const connected = liveKit.connection === "connected" && liveKit.agentReady;
 
@@ -47,14 +51,18 @@ export default function InterviewRoom({ tokenEndpoint }: { tokenEndpoint?: strin
           )}
           <section className="conversation-transcript" aria-label="Conversation transcript">
             <div className="transcript-heading"><h2>Your conversation</h2><span>{started ? "Live transcript" : "Voice or text"}</span></div>
-            <Transcript messages={liveKit.messages} />
+            <Transcript messages={liveKit.messages} provisional={liveKit.provisional} />
           </section>
+          {initialRecovery && liveKit.replyUnconfirmed && (liveKit.recoveryStatus === "interrupted" || !started) && <p role="status" className="interview-notice">Qalvi&apos;s last reply could not be confirmed. Your saved answer is still here.</p>}
+          {initialRecovery && liveKit.controlPending && !started && <p role="status" className="interview-notice">Your last answer was saved, but Qalvi could not confirm how to continue it. The conversation is preserved here.</p>}
+          {initialRecovery && liveKit.legacyHistory && liveKit.connection === "failed" && <p role="status" className="interview-notice">Earlier turns remain readable, but automatic recovery of this conversation is not available yet.</p>}
+          {terminal && <p role="status" className="interview-notice">This interview has ended. Your saved conversation is available to read here.</p>}
           {liveKit.connection === "connected" && liveKit.turn && liveKit.turn !== "responding" && <p role="status" className="interview-notice">
             {liveKit.turn === "delayed" ? "Qalvi is taking longer than expected. Your conversation is kept here. You do not need to send your answer again." : liveKit.turn === "opening" ? "Qalvi is preparing the opening question." : "Your answer was sent. Waiting for Qalvi to respond."}
           </p>}
           {liveKit.connection === "reconnecting" && <p role="status" className="interview-notice">Reconnecting. Your conversation and draft are kept here.</p>}
           {liveKit.connection === "connected" && !liveKit.voiceAvailable && <p role="status" className="interview-notice">Qalvi&apos;s voice is unavailable for now. Replies appear here as text, and you can keep speaking or typing.</p>}
-          {liveKit.connection === "failed" && <button type="button" className="interview-reconnect" onClick={() => void liveKit.reconnect()}>Reconnect interview</button>}
+          {!terminal && liveKit.connection === "failed" && <button type="button" className="interview-reconnect" onClick={() => void liveKit.reconnect()}>Reconnect interview</button>}
           {liveKit.display && !liveKit.visualReady && <p className="interview-notice">This visual is kept for reference. You can answer in words or wait for Qalvi to share a new visual.</p>}
           {liveKit.error && (
             <div role="alert" className="interview-notice">
@@ -69,7 +77,7 @@ export default function InterviewRoom({ tokenEndpoint }: { tokenEndpoint?: strin
           )}
         </div>
 
-        <div className="conversation-controls">
+        {!terminal && <div className="conversation-controls">
           <InterviewControls
             started={started}
             status={liveKit.status}
@@ -82,8 +90,12 @@ export default function InterviewRoom({ tokenEndpoint }: { tokenEndpoint?: strin
             onToggleMode={() => void handleToggleMode()}
             onMicTap={() => void liveKit.setMicrophone(!liveKit.micEnabled)}
             onSendText={liveKit.sendText}
+            draft={initialRecovery ? liveKit.draft : undefined}
+            onDraftChange={initialRecovery ? liveKit.setDraft : undefined}
+            draftLocked={initialRecovery ? liveKit.draftLocked : false}
+            onDiscardDraft={initialRecovery ? liveKit.discardDraft : undefined}
           />
-        </div>
+        </div>}
       </main>
     </div>
   );

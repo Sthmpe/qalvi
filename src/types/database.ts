@@ -290,11 +290,53 @@ export type Database = {
           },
         ]
       }
+      interview_turn_controls: {
+        Row: {
+          conversation_id: string
+          created_at: string
+          decision_action: string
+          message_id: string
+          methodology_version: string
+          schema_version: number
+          signals: Json
+          state_sha256: string
+        }
+        Insert: {
+          conversation_id: string
+          created_at?: string
+          decision_action: string
+          message_id: string
+          methodology_version: string
+          schema_version: number
+          signals: Json
+          state_sha256: string
+        }
+        Update: {
+          conversation_id?: string
+          created_at?: string
+          decision_action?: string
+          message_id?: string
+          methodology_version?: string
+          schema_version?: number
+          signals?: Json
+          state_sha256?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interview_turn_controls_message_id_conversation_id_fkey"
+            columns: ["message_id", "conversation_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id", "conversation_id"]
+          },
+        ]
+      }
       messages: {
         Row: {
           channel: string
           content: string
           content_search: unknown
+          control_protocol_version: number | null
           conversation_id: string
           created_at: string
           id: string
@@ -310,6 +352,7 @@ export type Database = {
           channel: string
           content: string
           content_search?: unknown
+          control_protocol_version?: number | null
           conversation_id: string
           created_at?: string
           id?: string
@@ -325,6 +368,7 @@ export type Database = {
           channel?: string
           content?: string
           content_search?: unknown
+          control_protocol_version?: number | null
           conversation_id?: string
           created_at?: string
           id?: string
@@ -691,6 +735,21 @@ export type Database = {
           message_sequence: number
         }[]
       }
+      append_recoverable_interview_message: {
+        Args: {
+          p_channel: string
+          p_content: string
+          p_conversation_id: string
+          p_event_key: string
+          p_occurred_at: string
+          p_writer_generation: number
+        }
+        Returns: {
+          inserted: boolean
+          message_id: string
+          message_sequence: number
+        }[]
+      }
       claim_conversation_writer: {
         Args: { p_conversation_id: string; p_livekit_room: string }
         Returns: number
@@ -719,6 +778,26 @@ export type Database = {
         Args: {
           p_conversation_id: string
           p_definition: Json
+          p_writer_generation: number
+        }
+        Returns: string
+      }
+      read_participant_interview_recovery: {
+        Args: {
+          p_after_sequence?: number
+          p_limit?: number
+          p_resume_hash: string
+        }
+        Returns: Json
+      }
+      record_interview_turn_control: {
+        Args: {
+          p_conversation_id: string
+          p_decision_action: string
+          p_message_id: string
+          p_methodology_version?: string
+          p_signals: Json
+          p_state_sha256: string
           p_writer_generation: number
         }
         Returns: string

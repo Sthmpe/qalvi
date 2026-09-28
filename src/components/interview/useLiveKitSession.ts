@@ -5,6 +5,8 @@ import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import type { ConnectionStatus, InputMode, InterviewStatus, TranscriptMessage } from "./types";
 import { readTranscript, transcriptId, upsertTranscript } from "./transcription";
 import { sessionHealth } from "./sessionHealth";
+import { canonicalTranscript, draftStorageKey, mergeCanonical, readStoredDraft, reconcileStoredDraft, terminalInterview,
+  type CanonicalMessage, type RecoverySnapshot, type StoredDraft } from "./recovery";
 import {
   describeResponse, parseDisplayAction, RESPONSE_PREFIX,
   type DisplayAction, type VisualResponse,
@@ -27,11 +29,19 @@ function mapAgentState(state: string | undefined): InterviewStatus | null {
   }
 }
 
-export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
+export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialRecovery?: RecoverySnapshot) {
   const realSession = tokenEndpoint !== "/api/livekit-token";
+  const canonicalRef = useRef<CanonicalMessage[]>(initialRecovery?.messages ?? []);
+  const [recoveryStatus, setRecoveryStatus] = useState(initialRecovery?.status ?? "pending");
+  const [replyUnconfirmed, setReplyUnconfirmed] = useState(initialRecovery?.replyUnconfirmed ?? false);
+  const [controlPending, setControlPending] = useState(initialRecovery?.controlPending ?? false);
+  const [legacyHistory, setLegacyHistory] = useState(initialRecovery?.legacyHistory ?? false);
+  const [draft, setDraftState] = useState("");
+  const [draftLocked, setDraftLocked] = useState(false);
   const [status, setStatus] = useState<InterviewStatus>("idle");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
-  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const [messages, setMessages] = useState<TranscriptMessage[]>(canonicalTranscript(initialRecovery?.messages ?? []));
+  const [provisional, setProvisional] = useState<TranscriptMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isActive, setIsActive] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
@@ -55,6 +65,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
   const reconnectRef = useRef<(() => Promise<void>) | null>(null);
   const interruptedSend = useRef<(() => void) | null>(null);
   const pendingEvidence = useRef<{ id: string; wire: string; at: string } | null>(null);
+  const storedDraft = useRef<StoredDraft | null>(null);
   const evidenceResults = useRef(new Map<string, "saved" | "failed">());
   const evidenceWaiter = useRef<{ id: string; resolve: (status: "saved" | "failed") => void } | null>(null);
   const desiredMic = useRef(false);
@@ -67,6 +78,65 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     pendingTurn.current = { since: Date.now(), excluded };
     setTurn(opening ? "opening" : "waiting");
   }, []);
+
+  const clearDraft = useCallback(() => {
+    storedDraft.current = null;
+    pendingEvidence.current = null;
+    setDraftState("");
+    setDraftLocked(false);
+    if (initialRecovery) sessionStorage.removeItem(draftStorageKey(initialRecovery.sessionKey));
+  }, [initialRecovery]);
+
+  const setDraft = useCallback((text: string) => {
+    if (draftLocked) return;
+    setDraftState(text);
+    if (!initialRecovery) return;
+    if (!text) { clearDraft(); return; }
+    const record = storedDraft.current?.text === text ? storedDraft.current
+      : { text, eventId: crypto.randomUUID(), at: new Date().toISOString(), pending: false };
+    storedDraft.current = record;
+    sessionStorage.setItem(draftStorageKey(initialRecovery.sessionKey), JSON.stringify(record));
+  }, [initialRecovery, draftLocked, clearDraft]);
+
+  useEffect(() => {
+    if (!initialRecovery) return;
+    const read = readStoredDraft(sessionStorage.getItem(draftStorageKey(initialRecovery.sessionKey)));
+    const record = reconcileStoredDraft(read, initialRecovery.messages, initialRecovery.status);
+    if (!record) {
+      sessionStorage.removeItem(draftStorageKey(initialRecovery.sessionKey));
+      return;
+    }
+    storedDraft.current = record;
+    if (record.pending) pendingEvidence.current = { id: record.eventId, wire: record.text.trim(), at: record.at };
+    let active = true;
+    queueMicrotask(() => {
+      if (active) { setDraftState(record.text); setDraftLocked(record.pending); }
+    });
+    return () => { active = false; };
+  }, [initialRecovery]);
+
+  const fetchRecovery = useCallback(async () => {
+    if (!initialRecovery) return;
+    let cursor = canonicalRef.current.at(-1)?.sequence ?? -1;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const response = await fetch(`/interview/api/state?afterSequence=${cursor}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("Saved conversation could not be checked.");
+      const page = await response.json() as RecoverySnapshot;
+      if (page.sessionKey !== initialRecovery.sessionKey) throw new Error("Interview session changed.");
+      setRecoveryStatus(page.status);
+      setReplyUnconfirmed(page.replyUnconfirmed);
+      setControlPending(page.controlPending);
+      setLegacyHistory(page.legacyHistory);
+      const merged = mergeCanonical(canonicalRef.current, page.messages);
+      canonicalRef.current = merged;
+      setMessages(canonicalTranscript(merged));
+      if (page.messages.length) setProvisional(null);
+      const saved = storedDraft.current && merged.some((message) => message.eventKey === `text:${storedDraft.current?.eventId}`);
+      if (saved || terminalInterview(page.status)) clearDraft();
+      if (!page.hasMore || page.nextCursor <= cursor) break;
+      cursor = page.nextCursor;
+    }
+  }, [initialRecovery, clearDraft]);
 
   const changeConnection = useCallback((next: ConnectionStatus) => {
     connectionRef.current = next;
@@ -117,11 +187,21 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
   }, [detachAudio, changeConnection]);
   useEffect(() => stop, [stop]);
 
+  useEffect(() => {
+    if (!realSession || connection !== "connected" || terminalInterview(recoveryStatus)) return;
+    const timer = setInterval(() => { void fetchRecovery().catch(() => {}); }, 4000);
+    return () => clearInterval(timer);
+  }, [realSession, fetchRecovery, connection, recoveryStatus]);
+
+  useEffect(() => {
+    if (realSession && terminalInterview(recoveryStatus) && roomRef.current) stop();
+  }, [realSession, recoveryStatus, stop]);
+
   const start = useCallback(async (mode: InputMode) => {
     if (roomRef.current) return;
     const attempt = ++generation.current;
     setError(null);
-    setMessages([]);
+    if (!realSession) setMessages([]);
     setDisplay(null);
     setDisplayResponse(null);
     setAudioBlocked(false);
@@ -250,6 +330,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       if (!current()) return;
       changeConnection("connected");
       updateAgent();
+      if (realSession) void fetchRecovery().catch(() => setError("Could not reload saved conversation. Try reconnecting."));
     });
     room.on(RoomEvent.Disconnected, failConnection);
     room.registerTextStreamHandler("lk.transcription", async (reader, participant) => {
@@ -257,7 +338,8 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       try {
         await readTranscript(reader, participant.identity, speaker, ++revision, (message) => {
           if (!current()) return;
-          setMessages((previous) => upsertTranscript(previous, message));
+          if (realSession) setProvisional(message);
+          else setMessages((previous) => upsertTranscript(previous, message));
           if (speaker === "ai" && message.text && !finalSegments.has(message.id)) {
             knownAiSegments.current.add(message.id);
             if (message.isFinal) completedAiSegments.current.add(message.id);
@@ -333,12 +415,10 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
         if (!current()) return;
         await room.connect(serverUrl, token);
         if (!current()) { void room.disconnect(); return; }
-        if (realSession) {
-          void fetch("/interview/api/joined", { method: "POST" }).catch(() => {});
-        }
         setIsActive(true);
         hasConnected = true;
         changeConnection("connected");
+        if (realSession) void fetchRecovery().catch(() => setError("Could not reload saved conversation. Your draft remains here."));
         if (!openingExpected && !pendingTurn.current && !knownAiSegments.current.size) expectResponse(true);
         updateAgent();
         if (desiredMic.current) {
@@ -363,7 +443,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
     };
     reconnectRef.current = join;
     await join();
-  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint, realSession]);
+  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint, realSession, fetchRecovery]);
 
   const reconnect = useCallback(async () => {
     if (connectionRef.current === "failed" || connectionRef.current === "disconnected") {
@@ -412,11 +492,19 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
         setError("On-screen answers are not available in this live study yet.");
         return false;
       }
-      const pending = realSession
-        ? pendingEvidence.current?.wire === wire ? pendingEvidence.current
-          : { id: crypto.randomUUID(), wire, at: new Date().toISOString() }
-        : null;
-      if (pending) pendingEvidence.current = pending;
+      const pending = realSession ? pendingEvidence.current?.wire === wire ? pendingEvidence.current
+        : storedDraft.current?.text.trim() === wire
+          ? { id: storedDraft.current.eventId, wire, at: storedDraft.current.at }
+          : { id: crypto.randomUUID(), wire, at: new Date().toISOString() } : null;
+      if (pending) {
+        pendingEvidence.current = pending;
+        if (initialRecovery) {
+          const record = { text: wire, eventId: pending.id, at: pending.at, pending: true };
+          storedDraft.current = record;
+          sessionStorage.setItem(draftStorageKey(initialRecovery.sessionKey), JSON.stringify(record));
+          setDraftLocked(true);
+        }
+      }
       const info = await Promise.race([room.localParticipant.sendText(wire, {
         topic: "lk.chat", ...(pending ? { attributes: {
           "qalvi.event_id": pending.id, "qalvi.event_at": pending.at,
@@ -431,10 +519,11 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
         evidenceWaiter.current = null;
         evidenceResults.current.delete(pending.id);
         if (acknowledgement !== "saved") throw new Error("Evidence was not saved");
-        pendingEvidence.current = null;
+        clearDraft();
+        await fetchRecovery().catch(() => {});
       }
       // LiveKit does not echo outgoing chat messages to their sender.
-      setMessages((previous) => upsertTranscript(previous, {
+      if (!realSession) setMessages((previous) => upsertTranscript(previous, {
         id: transcriptId(room.localParticipant.identity, info.id),
         speaker: "participant", isFinal: true, ...shown,
       }));
@@ -457,7 +546,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       interruptedSend.current = null;
       if (roomRef.current === room) { sendingRef.current = false; setSending(false); }
     }
-  }, [agentReady, expectResponse, realSession]);
+  }, [agentReady, expectResponse, realSession, initialRecovery, clearDraft, fetchRecovery]);
 
   const sendText = useCallback((text: string) => {
     const trimmed = text.trim();
@@ -492,7 +581,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token") {
       : turn && status !== "thinking" ? "waiting"
       : status === "listening" && !micEnabled ? "ready" : status
     : status;
-  return { status: participantStatus, connection, turn, messages, error, isActive, agentReady, micEnabled, micBusy, sending,
+  return { status: participantStatus, connection, turn, messages, provisional, draft, draftLocked, setDraft, discardDraft: clearDraft,
+    recoveryStatus, replyUnconfirmed, controlPending, legacyHistory,
+    error, isActive, agentReady, micEnabled, micBusy, sending,
     visualReady, voiceAvailable,
     audioBlocked, display, displayResponse, start, stop, reconnect, setMicrophone, sendText, respondToDisplay, enableAudio };
 }

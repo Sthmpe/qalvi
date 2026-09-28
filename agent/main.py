@@ -37,6 +37,7 @@ from persistence import (REAL_ROOM, EvidenceError, EvidenceWriter,
                          SupabaseEvidenceAPI, occurred_at, persist_then_continue)
 from turn_input import handle_text_input
 from presence import check_in_allowed, inactivity_prompt, next_check_at
+from recovery import control_data
 from signals import Exchange, classify
 from speech import SpeechFilter
 from visuals import DEMO_GOAL, DISPLAY_TOPIC, demo_steps_for_room
@@ -111,6 +112,7 @@ class Interviewer(Agent):
         self._traced_llm = traced_llm
         self._paused = False
         self._advanced_turns: set[str] = set()
+        self._turn_lock = asyncio.Lock()  # voice and typed callbacks share canonical control order
         self._assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = None
 
     def mark_evidence_ack(self, kind: str, sequence: int) -> None:
@@ -143,13 +145,25 @@ class Interviewer(Agent):
         if text:
             self._recent = (self._recent + [Exchange(role, text)])[-8:]
 
-    async def present(self, user_text: str) -> str | None:
+    async def present(self, user_text: str, saved: object | None = None) -> str | None:
         """One participant turn: read it, decide, act on the screen, return guidance for this reply."""
         conductor = self._conductor
-        signals = await classify(
-            self._classifier, self._recent, user_text, conductor.topics(), conductor.on_screen_label(),
-        )
+        try:
+            signals = await classify(
+                self._classifier, self._recent, user_text, conductor.topics(),
+                conductor.on_screen_label(), strict=bool(self._writer),
+            )
+        except Exception as exc:
+            if self._writer:
+                raise EvidenceError("Control classification could not be confirmed") from exc
+            raise
         decision = conductor.turn(user_text, signals)
+        if self._writer:
+            if saved is None:
+                raise EvidenceError("Canonical participant message is required before control")
+            await self._writer.record_control(saved.id, control_data(conductor, signals, decision))
+            logger.info("[qalvi evidence order] phase=control_db_ack sequence=%d monotonic_ns=%d",
+                        saved.sequence, time.monotonic_ns())
         self.remember("participant", user_text)
         if decision.clear:
             await self._room.local_participant.send_text("null", topic=DISPLAY_TOPIC)
@@ -184,28 +198,31 @@ class Interviewer(Agent):
         if self._paused:
             raise StopResponse()
         if self._writer:
-            content = new_message.text_content or ""
-            if not content.strip():
-                raise StopResponse()
-            key = "voice:" + new_message.id
-            guidance = None
-            async def advance(saved):
-                nonlocal guidance
-                if not saved.inserted:
+            async with self._turn_lock:
+                if self._paused:
                     raise StopResponse()
-                if key in self._advanced_turns:
+                content = new_message.text_content or ""
+                if not content.strip():
                     raise StopResponse()
-                self._advanced_turns.add(key)
-                self.mark_evidence_ack("voice", saved.sequence)
-                guidance = await self.present(content)
-            try:
-                await self.flush_assistant()
-                await persist_then_continue(
-                    lambda: self._writer.append(key, "participant", "voice", content,
-                                                occurred_at(new_message.created_at)), advance)
-            except EvidenceError:
-                await self.pause_evidence()
-                raise StopResponse() from None
+                key = "voice:" + new_message.id
+                guidance = None
+                async def advance(saved):
+                    nonlocal guidance
+                    if not saved.inserted:
+                        raise StopResponse()
+                    if key in self._advanced_turns:
+                        raise StopResponse()
+                    self._advanced_turns.add(key)
+                    self.mark_evidence_ack("voice", saved.sequence)
+                    guidance = await self.present(content, saved)
+                try:
+                    await self.flush_assistant()
+                    await persist_then_continue(
+                        lambda: self._writer.append(key, "participant", "voice", content,
+                                                    occurred_at(new_message.created_at)), advance)
+                except EvidenceError:
+                    await self.pause_evidence()
+                    raise StopResponse() from None
         else:
             guidance = await self.present(new_message.text_content or "")
         if guidance:
@@ -393,7 +410,8 @@ async def entrypoint(ctx: JobContext):
     )
     wait_for_opening = (lambda: ctx.wait_for_participant(identity=real_participant.identity)) \
         if real_participant else ctx.wait_for_participant
-    if not await opening.start(session, wait_for_opening):
+    if not await opening.start(session, wait_for_opening,
+                               fresh=writer.generation == 1 if writer else None):
         await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
         if writer:
             await writer.interrupt()

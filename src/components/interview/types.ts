@@ -7,6 +7,8 @@ export type Speaker = "ai" | "participant";
 
 export interface TranscriptMessage {
   id: string;
+  /** Canonical real-session order allocated by the database. */
+  sequence?: number;
   speaker: Speaker;
   text: string;
   isFinal?: boolean;

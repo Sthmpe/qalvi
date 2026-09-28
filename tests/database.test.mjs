@@ -41,7 +41,7 @@ const SUPABASE = `
 const TABLES = [
   "profiles", "workspaces", "workspace_members", "studies", "participants", "conversations",
   "messages", "visual_displays", "visual_responses", "findings", "finding_evidence",
-  "interview_invitations", "interview_resumes",
+  "interview_invitations", "interview_resumes", "interview_turn_controls",
 ];
 
 const users = {
@@ -353,7 +353,9 @@ describe("live interview persistence foundation", () => {
   test("privileged RPCs have a safe search path and only service_role execution", async () => {
     const names = ["claim_interview_invitation", "resolve_interview_resume", "claim_conversation_writer",
       "transition_interview_conversation", "append_interview_message", "issue_interview_visual",
-      "acknowledge_interview_visual", "append_interview_visual_response"];
+      "acknowledge_interview_visual", "append_interview_visual_response",
+      "append_recoverable_interview_message", "record_interview_turn_control",
+      "read_participant_interview_recovery"];
     for (const name of names) {
       const routine = await one(
         `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
@@ -563,6 +565,87 @@ describe("live interview persistence foundation", () => {
       "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[],$8)",
       [otherConversation, otherGeneration, "visual:foreign", CARDS.id, "Chose mixed", now(), ["mixed"], null])),
       /not rendered/);
+  });
+
+  test("versioned participant controls are immutable, idempotent and conversation-bound", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const at = now();
+    const saved = await pipeline(() => one(
+      "select * from public.append_recoverable_interview_message($1,$2,$3,'text',$4,$5)",
+      [conversation, generation, "text:stable", "A canonical answer", at]));
+    const retry = await pipeline(() => one(
+      "select * from public.append_recoverable_interview_message($1,$2,$3,'text',$4,$5)",
+      [conversation, generation, "text:stable", "A canonical answer", at]));
+    assert.deepEqual(retry, { ...saved, inserted: false });
+    assert.equal((await one("select control_protocol_version from messages where id = $1", [saved.message_id])).control_protocol_version, 1);
+    const signals = { intent: "continue", engagement: "neutral", covered: [], partial: [], probe: null, ambiguous: false };
+    const record = (target = saved.message_id, decision = "continue", owner = conversation) =>
+      pipeline(() => one("select public.record_interview_turn_control($1,$2,$3,$4::jsonb,$5,$6) as id",
+        [owner, generation, target, JSON.stringify(signals), decision, "a".repeat(64)]));
+    assert.equal((await record()).id, saved.message_id);
+    assert.equal((await record()).id, saved.message_id);
+    assert.equal((await one("select count(*)::int as n from interview_turn_controls where message_id = $1", [saved.message_id])).n, 1);
+    await assert.rejects(record(saved.message_id, "stop"), /conflicting control/);
+    await assert.rejects(pipeline(() => db.query(
+      "update interview_turn_controls set decision_action = 'stop' where message_id = $1", [saved.message_id])), /immutable|permission denied/);
+    const assistant = await pipeline(() => append(conversation, generation, "assistant:one", "Hello", now(), "interviewer"));
+    await assert.rejects(record(assistant.message_id), /versioned participant/);
+    const legacy = await pipeline(() => append(conversation, generation, "text:legacy", "Old answer", now()));
+    await assert.rejects(record(legacy.message_id), /versioned participant/);
+    const otherInvite = await issueInvitation();
+    const otherRoom = `qalvi-real-${randomUUID()}`;
+    const other = await claim(otherInvite.token, hash(), otherRoom);
+    await assert.rejects(record(saved.message_id, "continue", other), /not writable|versioned participant/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.record_interview_turn_control($1,$2,$3,$4::jsonb,$5,$6)",
+      [conversation, generation, saved.message_id, JSON.stringify(signals), "continue", "a".repeat(64)])), /permission denied/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "select * from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
+    await assert.rejects(as("anon", null, () => db.query(
+      "select * from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
+  });
+
+  test("recovery reads only one resume's ordered evidence and allows terminal read-only state", async () => {
+    const invite = await issueInvitation();
+    const resume = hash();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, resume, room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    await pipeline(() => append(conversation, generation, "assistant:greeting", "Welcome", now(), "interviewer"));
+    await pipeline(() => one("select * from public.append_recoverable_interview_message($1,$2,$3,'text',$4,$5)",
+      [conversation, generation, "text:answer", "My answer", now()]));
+    const read = async (capability, after = -1, limit = 100) => (await pipeline(() => one(
+      "select public.read_participant_interview_recovery($1,$2,$3) as state", [capability, after, limit]))).state;
+    const first = await read(resume, -1, 1);
+    assert.equal(first.messages.length, 1);
+    assert.equal(first.hasMore, true);
+    const second = await read(resume, first.nextCursor, 1);
+    assert.equal(second.messages.length, 1);
+    assert.ok(first.messages[0].sequence < second.messages[0].sequence);
+    assert.equal(second.messages[0].eventKey, "text:answer");
+    assert.equal(second.controlPending, true);
+    assert.equal(second.replyUnconfirmed, true);
+    assert.equal(first.workspace_id, undefined);
+    assert.equal(first.messages[0].study_id, undefined);
+    assert.equal(await read(hash()), null);
+    assert.equal(await read(resume, -2), null);
+    await pipeline(() => db.query(
+      "select public.transition_interview_conversation($1,$2,'completed')", [conversation, generation]));
+    assert.equal((await read(resume)).status, "completed");
+    await assert.rejects(pipeline(() => db.query(
+      "select public.claim_conversation_writer($1,$2)", [conversation, room])), /cannot accept a writer/);
+    await pipeline(() => db.query("update interview_resumes set revoked_at = now() where token_hash = $1", [resume]));
+    assert.equal(await read(resume), null);
+    const expired = hash();
+    await pipeline(() => db.query(
+      "insert into interview_resumes(conversation_id, token_hash, created_at, expires_at) values ($1,$2,now()-interval '2 days',now()-interval '1 day')",
+      [conversation, expired]));
+    assert.equal(await read(expired), null);
   });
 });
 
