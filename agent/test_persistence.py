@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from persistence import EvidenceError, EvidenceWriter, occurred_at, persist_then_continue
 from turn_input import handle_text_input
@@ -24,7 +24,7 @@ class FakeAPI:
         if path.startswith("/conversations?"):
             return [{"id": "conversation-1", "participant_id": "participant-1",
                      "livekit_room": "qalvi-real-00000000-0000-4000-8000-000000000001",
-                     "status": "pending", "consented_at": occurred_at()}]
+                     "livekit_profile_id": "primary", "status": "pending", "consented_at": occurred_at()}]
         if path.startswith("/interview_resumes?"):
             return [{"id": "resume-1"}]
         raise AssertionError(path)
@@ -110,6 +110,20 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writer.conversation_id, "conversation-1")
         self.assertEqual(writer.generation, 2)
         self.assertEqual(api.calls[-1][1]["p_livekit_room"], room)
+
+    async def test_worker_profile_must_match_database_transport_before_writer_claim(self):
+        api = FakeAPI()
+        room = "qalvi-real-00000000-0000-4000-8000-000000000001"
+        with patch.dict("os.environ", {"LIVEKIT_AGENT_NAME": "qalvi-interview"}, clear=True):
+            with self.assertRaises(EvidenceError):
+                await EvidenceWriter.claim(api, room, "participant-participant-1")
+        with patch.dict("os.environ", {"QALVI_LIVEKIT_PROFILE_ID": "backup_1"}):
+            with self.assertRaises(EvidenceError):
+                await EvidenceWriter.claim(api, room, "participant-participant-1")
+        self.assertEqual(api.calls, [])
+        with patch.dict("os.environ", {"QALVI_LIVEKIT_PROFILE_ID": "primary"}):
+            writer = await EvidenceWriter.claim(api, room, "participant-participant-1")
+        self.assertEqual(writer.generation, 2)
 
     async def test_voice_duplicate_text_and_assistant_are_ordered_once(self):
         api = FakeAPI()

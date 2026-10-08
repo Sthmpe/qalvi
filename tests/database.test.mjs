@@ -355,7 +355,10 @@ describe("live interview persistence foundation", () => {
       "transition_interview_conversation", "append_interview_message", "issue_interview_visual",
       "acknowledge_interview_visual", "append_interview_visual_response",
       "append_recoverable_interview_message", "record_interview_turn_control",
-      "read_participant_interview_recovery"];
+      "read_participant_interview_recovery", "claim_interview_invitation_with_profile",
+      "reserve_interview_transport", "confirm_interview_transport",
+      "rotate_interview_transport", "fail_interview_transport",
+      "report_interview_transport_connection_failure"];
     for (const name of names) {
       const routine = await one(
         `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
@@ -609,6 +612,32 @@ describe("live interview persistence foundation", () => {
       "select * from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
   });
 
+  test("immutable controls allow authorized whole-study cleanup without allowing direct deletion", async () => {
+    const study = (await pipeline(() => one(
+      "insert into studies (workspace_id, title, status) values ($1,'Control cascade cleanup','active') returning id",
+      [ids.alpha]))).id;
+    const invite = await issueInvitation(study, ids.alpha, users.alice);
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const saved = await pipeline(() => one(
+      "select * from public.append_recoverable_interview_message($1,$2,$3,'text',$4,$5)",
+      [conversation, generation, "text:cleanup", "A canonical answer", now()]));
+    const signals = { intent: "continue", engagement: "neutral", covered: [], partial: [], probe: null, ambiguous: false };
+    await pipeline(() => db.query(
+      "select public.record_interview_turn_control($1,$2,$3,$4::jsonb,'continue',$5)",
+      [conversation, generation, saved.message_id, JSON.stringify(signals), "a".repeat(64)]));
+    await assert.rejects(db.query("delete from interview_turn_controls where message_id = $1", [saved.message_id]), /immutable/);
+    await assert.rejects(pipeline(() => db.query(
+      "delete from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
+    await assert.rejects(db.query(
+      "update interview_turn_controls set decision_action = 'stop' where message_id = $1", [saved.message_id]), /immutable/);
+    await pipeline(() => db.query("delete from studies where id = $1", [study]));
+    assert.equal((await one("select count(*)::int as n from messages where conversation_id = $1", [conversation])).n, 0);
+    assert.equal((await one("select count(*)::int as n from interview_turn_controls where conversation_id = $1", [conversation])).n, 0);
+  });
+
   test("recovery reads only one resume's ordered evidence and allows terminal read-only state", async () => {
     const invite = await issueInvitation();
     const resume = hash();
@@ -748,5 +777,124 @@ describe("findings and their evidence", () => {
     for (const table of ["participants", "conversations", "messages", "findings", "finding_evidence"]) {
       assert.equal((await one(`select count(*)::int as n from ${table} where study_id = $1`, [study])).n, 0, table);
     }
+  });
+});
+
+describe("LiveKit profile routing and transport fencing", () => {
+  test("a profile claim and pre-evidence rotation keep one consented conversation and participant", async () => {
+    const invitationHash = randomBytes(32).toString("hex");
+    const resumeHash = randomBytes(32).toString("hex");
+    const firstRoom = `qalvi-real-${randomUUID()}`;
+    const secondRoom = `qalvi-real-${randomUUID()}`;
+    await pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash)
+       values ($1,$2,$3,$4)`, [ids.alpha, ids.alphaStudy, users.alice, invitationHash]));
+    const conversationId = await pipeline(async () => (await one(
+      "select public.claim_interview_invitation_with_profile($1,$2,$3,'consent-v1','primary') as id",
+      [invitationHash, resumeHash, firstRoom])).id);
+    const first = await one("select participant_id, livekit_profile_id, transport_generation from conversations where id = $1",
+      [conversationId]);
+    assert.equal(first.livekit_profile_id, "primary");
+    assert.equal(first.transport_generation, 1);
+    const nonce = randomUUID();
+    assert.equal((await pipeline(() => one(
+      "select public.reserve_interview_transport($1,'primary',1,$2,50) as reserved",
+      [conversationId, nonce]))).reserved, true);
+    assert.equal((await pipeline(() => one(
+      "select public.reserve_interview_transport($1,'primary',1,$2,50) as reserved",
+      [conversationId, randomUUID()]))).reserved, false);
+    const rotated = await pipeline(() => one(
+      "select public.rotate_interview_transport($1,'primary',1,$2,$3,'backup_1',$4,'assignment_timeout') as generation",
+      [conversationId, firstRoom, nonce, secondRoom]));
+    assert.equal(rotated.generation, 2);
+    const second = await one(`select participant_id, livekit_profile_id, livekit_room,
+      transport_generation, previous_livekit_profile_id, transport_failed_profiles,
+      transport_failure_reason from conversations where id = $1`, [conversationId]);
+    assert.equal(second.participant_id, first.participant_id);
+    assert.equal(second.livekit_profile_id, "backup_1");
+    assert.equal(second.livekit_room, secondRoom);
+    assert.equal(second.transport_generation, 2);
+    assert.equal(second.previous_livekit_profile_id, "primary");
+    assert.deepEqual(second.transport_failed_profiles, ["primary"]);
+    assert.equal(second.transport_failure_reason, "assignment_timeout");
+    assert.equal((await one("select count(*)::int as n from messages where conversation_id = $1",
+      [conversationId])).n, 0);
+    assert.equal((await one("select count(*)::int as n from participants where id = $1",
+      [first.participant_id])).n, 1);
+    await assert.rejects(pipeline(() => db.query(
+      "select public.rotate_interview_transport($1,'primary',1,$2,$3,'backup_1',$4,'quota')",
+      [conversationId, firstRoom, nonce, `qalvi-real-${randomUUID()}`])), /unsafe or stale/);
+    const secondNonce = randomUUID();
+    assert.equal((await pipeline(() => one(
+      "select public.reserve_interview_transport($1,'backup_1',2,$2,50) as reserved",
+      [conversationId, secondNonce]))).reserved, true);
+    assert.equal((await pipeline(() => one(
+      "select public.confirm_interview_transport($1,'backup_1',2,$2) as confirmed",
+      [conversationId, secondNonce]))).confirmed, true);
+    const generation = await pipeline(async () => (await one(
+      "select public.claim_conversation_writer($1,$2) as generation",
+      [conversationId, secondRoom])).generation);
+    assert.equal(generation, 1);
+    await assert.rejects(pipeline(() => db.query(
+      "select public.rotate_interview_transport($1,'backup_1',2,$2,$3,'primary',$4,'quota')",
+      [conversationId, secondRoom, secondNonce, `qalvi-real-${randomUUID()}`])), /unsafe or stale/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.reserve_interview_transport($1,'backup_1',2,$2,50)",
+      [conversationId, randomUUID()])), /permission denied/);
+    await assert.rejects(as("anon", null, () => db.query(
+      "select public.rotate_interview_transport($1,'backup_1',2,$2,$3,'primary',$4,'quota')",
+      [conversationId, secondRoom, secondNonce, `qalvi-real-${randomUUID()}`])), /permission denied/);
+  });
+
+  test("two distinct failed WebRTC connects are counted once each and fenced to the pending generation", async () => {
+    const invitationHash = randomBytes(32).toString("hex");
+    const firstRoom = `qalvi-real-${randomUUID()}`;
+    await pipeline(() => db.query(
+      `insert into interview_invitations(workspace_id, study_id, issued_by, token_hash)
+       values ($1,$2,$3,$4)`, [ids.alpha, ids.alphaStudy, users.alice, invitationHash]));
+    const conversationId = await pipeline(async () => (await one(
+      "select public.claim_interview_invitation_with_profile($1,$2,$3,'consent-v1','primary') as id",
+      [invitationHash, randomBytes(32).toString("hex"), firstRoom])).id);
+    const nonce = randomUUID();
+    await pipeline(() => db.query("select public.reserve_interview_transport($1,'primary',1,$2,50)",
+      [conversationId, nonce]));
+    await pipeline(() => db.query("select public.confirm_interview_transport($1,'primary',1,$2)",
+      [conversationId, nonce]));
+    const eventA = randomUUID();
+    const eventB = randomUUID();
+    const report = (generation, event) => pipeline(() => one(
+      "select public.report_interview_transport_connection_failure($1,$2,$3) as count",
+      [conversationId, generation, event]));
+    assert.equal((await report(1, eventA)).count, 1);
+    assert.equal((await report(1, eventA)).count, 1);
+    assert.equal((await report(1, eventB)).count, 2);
+    const reserved = randomUUID();
+    assert.equal((await pipeline(() => one(
+      "select public.reserve_interview_transport($1,'primary',1,$2,50) as reserved",
+      [conversationId, reserved]))).reserved, true);
+    await pipeline(() => db.query(
+      "select public.rotate_interview_transport($1,'primary',1,$2,$3,'backup_1',$4,'transport_unavailable')",
+      [conversationId, firstRoom, reserved, `qalvi-real-${randomUUID()}`]));
+    const after = await one("select transport_generation, transport_connection_failures from conversations where id = $1",
+      [conversationId]);
+    assert.equal(after.transport_generation, 2);
+    assert.equal(after.transport_connection_failures, 0);
+    await assert.rejects(report(1, eventA), /stale or unsafe/);
+    const secondNonce = randomUUID();
+    assert.equal((await pipeline(() => one(
+      "select public.reserve_interview_transport($1,'backup_1',2,$2,50) as reserved",
+      [conversationId, secondNonce]))).reserved, true);
+    assert.equal((await pipeline(() => one(
+      "select public.confirm_interview_transport($1,'backup_1',2,$2) as confirmed",
+      [conversationId, secondNonce]))).confirmed, true);
+    await pipeline(() => message(conversationId, 0, "participant", "text", "Persisted before the report."));
+    // A direct canonical row must also fence browser reports, even if a
+    // legacy writer has not advanced next_message_sequence yet.
+    assert.equal((await one("select next_message_sequence from conversations where id = $1",
+      [conversationId])).next_message_sequence, 0);
+    await assert.rejects(report(2, randomUUID()), /stale or unsafe/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.report_interview_transport_connection_failure($1,2,$2)",
+      [conversationId, randomUUID()])), /permission denied/);
   });
 });

@@ -465,3 +465,182 @@ deployment. Do not infer voice/text recovery acceptance from the local tests.
 The consent POST origin check accepts an opaque `Origin` only when browser-owned
 Fetch Metadata proves a same-origin document navigation; cross-site and missing
 metadata remain denied. This preserves the invitation page's no-referrer policy.
+
+## 2026-09-29 — LiveKit multi-profile routing foundation (unaccepted)
+
+Keep the Qalvi conversation and canonical evidence independent of any LiveKit
+project. Persist only a profile alias, room and generation on the conversation;
+the server keeps each project's URL/key/secret together in an ordered profile.
+The old unnamed single-project setup remains compatible when profile routing is
+not configured. Multi-project mode requires a separately deployed named worker
+in each LiveKit project and uses server-side explicit dispatch. A bounded job
+assignment wait distinguishes PENDING from a worker with an ID. A service-only
+database lease and compare-and-swap rotation permit failover only before a
+writer/evidence exists. Quota, timeout and provider availability can select the
+next project; authorization, schema and app failures cannot. Browser 202 token
+responses mean continue waiting/retry, never resend a participant message.
+Two distinct failed WebRTC connect attempts can rotate a still-pending session;
+the database deduplicates reports by event ID and refuses reports after a writer
+or evidence exists. The participant cannot choose a profile or room.
+Configuration fails closed once `LIVEKIT_PROFILE_IDS` is present: incomplete
+profiles, duplicate priorities, missing agent names, and unknown saved aliases
+cannot use the legacy unnamed project. Only an unset list permits legacy mode.
+Browser failure reports are generation-fenced, idempotent, limited to the
+cookie-scoped session, and cannot set global provider health. Each enabled
+profile gets one assignment attempt per routing cycle. For N profiles, at most
+N-1 pre-interview rotations occur; the default assignment-wait component is
+at most N x 45 seconds, plus provider setup/retry overhead. The browser has a
+10-minute preparation deadline, but there is no persisted aggregate deadline.
+Mid-interview cross-project recovery requires Stage 2B.4B reconstruction and
+is intentionally not implemented. Local tests are not live backup acceptance.
+
+## 2026-10-07 — Real refresh closes the SDK session unless explicitly preserved
+
+The named primary worker successfully handled the one authorized fresh
+participant session. No primary failure occurred, so failover was not inferred
+or forced after writer ownership and canonical evidence existed. Voice and text
+each showed database message acknowledgement, control acknowledgement, then
+reply-model invocation. Browser refresh reconstructed seven canonical rows,
+and saved control replay matched its hash without running the classifier.
+
+Runtime logs then proved `CLIENT_INITIATED` refresh invoked the SDK's default
+immediate agent-session closure. The agent participant remained visible, but
+an explicit typed retry no longer reached a live input handler. Its draft stayed
+locked and preserved, and no new or duplicate evidence was created. Override
+that SDK option only for real sessions and retain the existing worker for a
+bounded 120-second grace owned by the saved participant identity. Expiry marks
+the conversation interrupted and shuts down the job. No replacement worker,
+classifier replay, dispatch redesign or automatic resend is added.
+
+The user declined an additional fresh failover session. Stage 2B.4A remains
+unaccepted; the correction and backup failover both require live retest before
+commit or closure. Stage 2B.4B remains deferred.
+
+The same review found Cloud jobs supply `enable_recording=True`. The installed
+SDK inherits that flag when `AgentSession.start(record=...)` is omitted and
+enables its audio recorder. Explicitly set `record=False`: participant consent
+permits the canonical research transcript, not Cloud audio/session recordings.
+This corrective source is not claimed as live verified or deployed. Both
+workers must receive the corrected source before the next live acceptance.
+
+Temporary study deletion failed with `23001`: the control immutability trigger
+also rejects the canonical message's foreign-key delete cascade. A follow-up
+local migration allows a control delete only after its canonical parent is
+absent. Direct deletes/updates remain forbidden, and grants/RLS are unchanged.
+The new migration is not applied remotely. The temporary study/workspace rows
+are retained, its session is cancelled and capabilities revoked, and the
+temporary Auth account is removed. Apply the reviewed correction before
+retrying fixture cleanup. Retained study: `4a46e1bb-6ce2-4cf0-9d9f-f0b4f871740b`;
+workspace: `ba6ed154-b901-4389-b6ed-4102c27f7cfc`.
+
+## 2026-10-07 — Corrected same-worker recovery passes; failover still open
+
+Applied only forward migration `20261007000100_control_cascade_cleanup.sql`.
+The linked schema is current. Direct control deletion remains forbidden;
+authorized whole-study cascade removed the previously cancelled fixture while
+unrelated message IDs remained unchanged. RLS and service-only RPC grants remain.
+
+Corrected production sources deployed to the existing primary (`UUEPp5yezJfq`)
+and backup (`3QzkQUTG44KT`); neither Cloud agent resource was replaced.
+Primary session logs confirm `close_on_disconnect=false`, 120-second grace,
+and `recording_enabled=False`. The first fresh corrective session showed a
+second lifecycle failure: LiveKit removed the room about 25 seconds after the
+last standard participant left. An agent participant does not prevent that
+provider departure timeout. Specify 150 seconds at named-room creation so
+the application's 120-second grace can finish first. Do not extend grace
+indefinitely or introduce replacement-worker logic.
+
+The second fresh session retained participant `17127416-5eba-4025-9f37-2d5616fc70df`,
+conversation `fc516c6c-56af-4622-903c-8f2ebda54bce`, room `RM_ag9kc2SpiJEc`,
+transport generation 1, writer generation 1, and job `AJ_28AoLBjJvzWe` across
+refresh. Runtime showed message ACK, control ACK, then model invocation for
+voice, normal text and post-refresh draft retry. Three completed SDK voice
+items had distinct content/event IDs; no interim captions were treated as
+canonical rows. Eleven canonical rows reconstructed in database sequence;
+five saved controls replayed without classification. The seeded uncertain
+tab draft retained its stable event ID, was not automatically resent, and an
+explicit retry created one row, cleared the draft and received an assistant
+reply. Opening was not replayed. The transcript equality harness initially
+compared incompatible Unicode JSON encodings; correcting that check verified
+the existing UI rather than prompting a product change.
+
+Both available fresh sessions were used for recovery diagnosis/retest.
+Controlled routing failover was not run, and normal primary configuration was
+never replaced with a failure target. Stage 2B.4A remains OPEN, not accepted or
+committed. Human microphone/device acceptance, replacement-worker recovery,
+visual persistence and cancellation ejection remain deferred to their approved
+later stages. Application cancellation denies new tokens and canonical writes;
+it is not claimed to eject an already-connected LiveKit participant.
+
+Final linked checks rejected six anonymous/authenticated privileged RPC and
+raw-message operations, stale writer and wrong-profile claims, forged resume
+cookies on state/token routes, and canonical writes after cancellation.
+Cancelled refresh remained read-only. Node tests passed 106/106, Python
+108/108; TypeScript, lint, production build and diff checks passed. Exact-value
+scans of source/client assets against local app and agent credentials found no
+matches. Both temporary rooms/dispatches, the disposable study/workspace,
+capability rows, canonical fixture rows and Auth user were removed through
+scoped cleanup; unrelated evidence was unchanged. Deployment resources remain.
+
+## 2026-10-08 — Stage 2B.4A closed: live primary-to-backup failover accepted
+
+Acceptance A (same-worker recovery, 2026-10-07) stands and was not repeated.
+Acceptance B forced a real primary assignment failure without touching either
+LiveKit deployment. For one Next.js server run only, the primary profile's agent
+target was overridden in the server's process environment to
+`qalvi-interview-primary-failover-probe`. `.env.local`, priorities, enabled
+flags and deployment pins were unchanged, and no deployment pin was set. The
+override was removed by restarting without it.
+
+One fresh invitation and consent produced participant
+`6a1d8757-aed1-43f3-a43f-81f20b4d6ebd` and conversation
+`d627fa9f-22a8-4249-b88d-329f6eceaf7e`.
+
+- Primary: room `qalvi-real-b2e5cfd7-095c-499b-ac53-0a38685dd336` (`RM_tj5SUXbWT766`)
+  received named dispatch `AD_vYprWKextx5a` to the probe name. LiveKit never
+  created a job for it, so the router raised `assignment_timeout` 46.5 s after
+  the dispatch and rotated at 01:59:07.890 UTC. The browser's first token request
+  returned 202 after 53.1 s. No participant ever joined this room.
+- Backup: room `qalvi-real-03ac1e94-821a-439c-a215-cb86663f0f46` (`RM_GJpsPU2XeQ6D`)
+  received dispatch `AD_2fnBiGqccNAe` to `qalvi-interview-backup-1`. The sleeping
+  worker cold-started, registered as `CAW_64t9aEG55QEJ` under that agent name, and
+  ran job `AJ_T2dxm5XGbgGN` 10.3 s after the dispatch. The second token request
+  returned 200 after 16.6 s.
+- Conversation after rotation: `livekit_profile_id=backup_1`, `transport_generation=2`,
+  `previous_livekit_profile_id=primary`, `transport_failure_reason=assignment_timeout`,
+  `transport_failed_profiles={primary}`, same participant and conversation,
+  `writer_generation=1`.
+- The backup worker's successful fenced claim proves its `QALVI_LIVEKIT_PROFILE_ID`
+  is `backup_1`: the claim requires that value whenever `LIVEKIT_AGENT_NAME` is set,
+  and both secrets exist. It logged `recording_enabled=False` although the Cloud
+  job requested recording. It wrote the opening (sequence 0), a version-1 typed
+  participant turn (sequence 1) with message ACK, then control ACK, then reply
+  generation, and the reply (sequence 2). There was one control record, the draft
+  cleared after acknowledgement, and the greeting was not replayed.
+- Live probes: the old primary room maps to no conversation; a stale generation-1
+  rotation and a rotation of the active session both returned "transport rotation
+  is unsafe or stale"; a stale generation-1 lease was not granted; state was
+  unchanged afterwards.
+
+The pre-registered contingency, a probe job marked FAILED before assignment
+returning 500, did not occur, so the router was not changed. Treating such a
+FAILED job as a failover-eligible provider failure remains a documented open
+question, not a change.
+
+LiveKit Cloud attached an automatic unnamed dispatch to each server-created room.
+It stayed jobless because every worker in both projects is named. Deploying an
+unnamed worker into a profile project is therefore not allowed.
+
+The disposable researcher, workspace, study, invitation, conversation, canonical
+rows and both rooms were removed through scoped cleanup, and all ten checked
+table counts returned to their baseline. Both deployments remained `UUEPp5yezJfq`
+and `3QzkQUTG44KT`.
+
+Migration verification: remote history lists the same seven versions as the
+repository. `supabase migration fetch` into a scratch directory returned SQL
+identical to every local file apart from blank lines between statements, which
+the history table does not store. `20261007000100` is byte-identical.
+
+Stage 2B.4A is CLOSED. Stage 2B.4B (replacement worker after worker loss,
+post-grace orphan rooms, natural completion status, the `in_progress` shutdown
+boundary, cancellation ejection) has not started.

@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED. Stage 2B.4B has not started.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -187,7 +187,7 @@ LLM, while retrying a lost acknowledgement resolves to the existing row.
 Temporary acceptance fixtures were removed. A longer audio sample split into
 two distinct final STT turns, so turn segmentation remains dependent on VAD/STT.
 
-Stage 2B.4A implementation in review: version-marked participant turns,
+Stage 2B.4A (CLOSED 2026-10-08; the dated history below ends with the closure record): version-marked participant turns,
 one immutable derived control record per processed turn, a service-only resume
 recovery read, and browser reconstruction from canonical database sequence.
 The real agent must acknowledge both the participant message and its control
@@ -201,11 +201,97 @@ the controlled test. No voice/text evidence or refresh result is claimed from
 that stalled live run. The narrow same-origin consent-form compatibility fix is
 covered by a gateway regression test.
 
+The LiveKit multi-profile failover foundation was also delivered within
+2B.4A. It adds server-only ordered project profiles, named explicit dispatch
+with a bounded worker-assignment wait, and a service-only compare-and-swap
+transport rotation before any writer/evidence exists. The same conversation
+survives a pre-interview project switch. The existing single-project automatic
+dispatch remains the default when profiles are unset. The linked primary
+gateway exercised the new profile schema on 2026-10-07, but no second-project
+live failover acceptance is claimed. This foundation does not close 2B.4A or
+start 2B.4B.
+
 Stage 2B.4B remains separate: replacement Cloud worker reconstruction and
 generation takeover, heartbeat/lease and stale-session cleanup, cancellation
 ejection/token revocation with durable retries, and human browser/microphone
 acceptance. Visual display/response persistence and researcher evidence reads
 remain later work. No findings generation or analytics are included.
+
+The initial 2026-10-07 acceptance remained incomplete. The existing primary was deployed as
+`qalvi-interview-primary` and successfully assigned the one fresh real session;
+its previous quota/assignment failure did not occur, so live failover and backup
+profile fencing were not exercised. Voice and typed turns each passed observed
+message-ACK, control-ACK, reply-generation ordering. Seven canonical rows
+reconstructed after refresh, and saved controls replayed without classification.
+Continuing after refresh failed: the SDK's default immediate disconnect closure
+had stopped the agent session while its room participant remained visible.
+A real-session-only 120-second reconnect grace fixes that lifecycle locally,
+with identity fencing, bounded expiry and regression tests. Its live retest and
+two-project failover acceptance remain outstanding. The user retained the
+one-session limit. Stage 2B.4A is not accepted or closed, and no checkpoint commit
+is authorized by this incomplete acceptance.
+
+Corrective validation passed 106 Node tests (including database/RLS), 108
+Python tests, TypeScript, lint, production build, diff checks and exact-value
+source/client-bundle credential scans. The SDK recording option is now
+explicitly disabled in source; that correction is not deployed or live verified.
+A local cleanup migration fixes control-record deletion through the existing
+canonical-parent cascade while retaining direct immutability and all grants/RLS.
+It is not applied remotely. The cancelled, archived fixture's canonical rows
+remain pending that migration; its capabilities and temporary Auth account were
+removed. Its retained IDs are recorded in DECISIONS.
+
+Later corrective acceptance on 2026-10-07 applied the forward cleanup migration
+`20261007000100`; remote history and dry-run confirmed the schema is current.
+The previously archived fixture now cascades safely without changing unrelated
+evidence or privileged grants. Both existing workers received the corrected
+source: primary `UUEPp5yezJfq`, backup `3QzkQUTG44KT`. Primary runtime confirmed
+the 120-second grace and disabled SDK recording.
+
+The first corrective live session exposed an additional provider-room lifetime
+bug: the room disappeared about 25 seconds after participant departure despite
+agent grace. Named room creation now specifies a 150-second departure timeout.
+The second and final allowed fresh session passed refresh/reconnect, a subsequent
+participant/assistant turn, stable-ID draft retry with one canonical row, and
+database sequence/control replay. Browser polling was allowed to catch up;
+the harness's Unicode equality check was corrected without changing the UI.
+The two-session cap is exhausted. Controlled primary-to-backup failover remains
+unverified, so Stage 2B.4A is still OPEN and no acceptance checkpoint is committed.
+Stage 2B.4B remains deferred.
+
+Final corrective validation passed 106 Node tests (including DB/RLS), 108
+Python tests, TypeScript, lint, production build, diff and credential/bundle
+checks. Terminal access and writer checks passed. Both cancelled acceptance
+fixtures and their temporary researcher were cleaned without changing unrelated
+evidence. These passing recovery checks do not substitute for live failover.
+
+**Stage 2B.4A: CLOSED (2026-10-08).** Acceptance A (same-worker refresh and
+reconnect, stable-ID draft retry, canonical sequence and control replay) passed
+on 2026-10-07 and was not repeated. Acceptance B passed on 2026-10-08 with one
+fresh session. Only the Next.js server's primary agent target was overridden, for
+that run, to a name no worker serves; both deployments, priorities and enabled
+flags were unchanged. The primary room received a named dispatch that LiveKit
+never assigned. After the configured 45-second wait the router classified
+`assignment_timeout` (46.5 s from dispatch to rotation; the browser's first token
+request returned 202 after 53 s) and rotated the same participant and conversation
+once, from `primary`/generation 1 to `backup_1`/generation 2, with a new room.
+The sleeping backup worker cold-started and was assigned 10.3 s after its dispatch
+(second token request 200 after 16.6 s). It claimed writer generation 1 against
+the `backup_1` conversation and wrote the opening, a typed participant turn with
+message then control acknowledgement before reply generation, and the reply.
+No participant joined the primary room. Live probes confirmed stale-generation
+rotation, rotation of the active session, and a stale lease are all refused.
+The primary target was restored, and the disposable fixture and both rooms were
+removed with unrelated row counts unchanged.
+
+Applied migrations through 2B.4A: `20260924000100`, `20260927000100`,
+`20260929000100` and `20261007000100`. Local files match remote history
+statement for statement. Primary worker `UUEPp5yezJfq`, backup `3QzkQUTG44KT`.
+Known limitations carried into Stage 2B.4B: no replacement worker after worker
+loss; after grace expiry a participant can rejoin a room with no agent; natural
+completion is recorded as `interrupted`; a shutdown racing grace expiry can leave
+`in_progress`; cancellation does not eject a connected participant; no
+mid-interview cross-project failover. Stage 2B.4B is not started.
 
 Store:
 - studies

@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import { createSupabaseSecretClient } from "@/lib/supabase/secret";
+import { loadLiveKitProfiles } from "./livekitProfiles";
 
 export const RESUME_COOKIE = "qalvi_interview_resume";
 export const CONSENT_VERSION = "transcript-v1";
@@ -84,10 +85,20 @@ export async function claimInvitation(token: string, admin?: Client) {
   if (!validCapability(token)) return null;
   const resume = newCapability();
   const room = `qalvi-real-${randomUUID()}`;
-  const { data: conversationId, error } = await (admin ?? createSupabaseSecretClient()).rpc("claim_interview_invitation", {
+  const multiProfile = process.env.LIVEKIT_PROFILE_IDS !== undefined;
+  const profile = multiProfile
+    ? loadLiveKitProfiles().find((candidate) => candidate.enabled) : null;
+  if (multiProfile && !profile) throw new Error("No LiveKit profile is available.");
+  const args = {
     p_invitation_hash: capabilityHash(token), p_resume_hash: capabilityHash(resume),
     p_livekit_room: room, p_consent_version: CONSENT_VERSION,
-  });
+  };
+  const elevated = admin ?? createSupabaseSecretClient();
+  const { data: conversationId, error } = profile
+    ? await elevated.rpc("claim_interview_invitation_with_profile", {
+        ...args, p_livekit_profile_id: profile.id,
+      })
+    : await elevated.rpc("claim_interview_invitation", args);
   if (error || !conversationId) return null;
   return { resume, conversationId };
 }
@@ -105,4 +116,14 @@ export async function resolveParticipant(token: unknown, admin?: Client) {
     .eq("id", id).maybeSingle();
   if (readError || !conversation?.livekit_room || !["pending", "in_progress", "interrupted"].includes(conversation.status)) return null;
   return conversation;
+}
+
+/** Only the trusted token gateway reads routing metadata. The browser never selects it. */
+export async function readParticipantTransport(conversationId: string, admin?: Client) {
+  const elevated = admin ?? createSupabaseSecretClient();
+  const { data, error } = await elevated.from("conversations")
+    .select("id, livekit_room, livekit_profile_id, transport_generation, transport_failed_profiles, transport_failure_reason, transport_connection_failures, transport_ready_at, transport_preparation_at, status, writer_generation, next_message_sequence")
+    .eq("id", conversationId).maybeSingle();
+  if (error || !data?.livekit_room) throw new Error("Interview transport could not be read.");
+  return { ...data, livekit_room: data.livekit_room };
 }

@@ -72,7 +72,8 @@ test("stream ID is the fallback, never transcript text", async () => {
   assert.equal(messages[0].id, transcriptId("user", "stream-a"));
 });
 
-function sessionHarness(tokenEndpoint, seedMessages = []) {
+function sessionHarness(tokenEndpoint, seedMessages = [], tokenReplies = [], connectFailures = 0,
+  connectFailureReason = 1) {
   const slots = [];
   let cursor = 0;
   const rooms = [];
@@ -117,7 +118,11 @@ function sessionHarness(tokenEndpoint, seedMessages = []) {
       };
     }
     async startAudio() {}
-    async connect() { if (this.failConnect) throw new Error("offline"); this.engine.isClosed = false; this.state = "connected"; }
+    async connect(url) { if (this.failConnect) throw new Error("offline");
+      if (connectFailures-- > 0) throw Object.assign(new Error("connect failed"), {
+        reason: connectFailureReason, status: connectFailureReason === 0 ? 401 : undefined,
+      });
+      (this.connections ??= []).push(url); this.engine.isClosed = false; this.state = "connected"; }
     async disconnect() { this.disconnected = true; }
   }
   const react = {
@@ -134,7 +139,10 @@ function sessionHarness(tokenEndpoint, seedMessages = []) {
     useCallback: (callback) => callback,
     useEffect: () => {},
   };
-  const livekit = { Room, RoomEvent: new Proxy({}, { get: (_, key) => key }), Track: { Kind: { Audio: "audio" } }, ConnectionState: { Connected: "connected", Reconnecting: "reconnecting", SignalReconnecting: "signalReconnecting", Disconnected: "disconnected", Connecting: "connecting" } };
+  const livekit = { Room, RoomEvent: new Proxy({}, { get: (_, key) => key }), Track: { Kind: { Audio: "audio" } },
+    ConnectionErrorReason: { NotAllowed: 0, ServerUnreachable: 1, InternalError: 2, Cancelled: 3,
+      LeaveRequest: 4, Timeout: 5, WebSocket: 6, ServiceNotFound: 7 },
+    ConnectionState: { Connected: "connected", Reconnecting: "reconnecting", SignalReconnecting: "signalReconnecting", Disconnected: "disconnected", Connecting: "connecting" } };
   const health = load("../src/components/interview/sessionHealth.ts", { "livekit-client": livekit });
   // The test harness supplies hook storage; no React renderer is involved.
   const { useLiveKitSession: runHook } = load("../src/components/interview/useLiveKitSession.ts", {
@@ -157,6 +165,7 @@ function sessionHarness(tokenEndpoint, seedMessages = []) {
           controlPending: false, legacyHistory: false }) };
       }
       requests.push(JSON.parse(options.body));
+      if (tokenReplies.length) return tokenReplies.shift();
       return { ok: true, json: async () => ({ serverUrl: "mock", token: "mock" }) };
     },
   });
@@ -186,6 +195,64 @@ test("real refresh starts from canonical rows and keeps live captions separate",
   room.handlers.get("Reconnected")();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(h.render().messages.length, 2);
+});
+
+test("replacement token connects to another LiveKit URL without resetting canonical transcript or draft", async () => {
+  const saved = { id: "database-1", sequence: 0, speaker: "interviewer", channel: "voice",
+    content: "First question", eventKey: "assistant:opening", interrupted: false };
+  const ready = (url, generation) => ({ status: 200, ok: true,
+    json: async () => ({ serverUrl: url, token: `jwt-${generation}`, transportGeneration: generation }) });
+  const h = sessionHarness("/interview/api/token", [saved], [
+    ready("wss://primary.test", 1),
+    { status: 202, ok: false },
+    ready("wss://backup.test", 2),
+  ]);
+  await h.render().start("text");
+  h.render().setDraft("Unsent participant thought");
+  const room = h.rooms[0];
+  room.handlers.get("Disconnected")();
+  assert.equal(h.render().connection, "failed");
+  await h.render().reconnect();
+  assert.deepEqual(room.connections, ["wss://primary.test", "wss://backup.test"]);
+  assert.equal(h.rooms.length, 1);
+  assert.equal(h.render().messages[0].id, "database-1");
+  assert.equal(h.render().draft, "Unsent participant thought");
+  assert.equal(room.localParticipant.sent.length, 0);
+});
+
+test("two failed pre-interview connects report stable events and accept a replacement project", async () => {
+  const ready = (url, generation) => ({ status: 200, ok: true,
+    json: async () => ({ serverUrl: url, token: `jwt-${generation}`, transportGeneration: generation }) });
+  const h = sessionHarness("/interview/api/token", [], [
+    ready("wss://primary.test", 1), ready("wss://primary.test", 1),
+    { status: 202, ok: false }, ready("wss://backup.test", 2),
+  ], 2);
+  await h.render().start("text");
+  assert.equal(h.render().connection, "failed");
+  h.render().setDraft("Still my draft");
+  await h.render().reconnect();
+  assert.equal(h.render().connection, "failed");
+  await h.render().reconnect();
+  assert.equal(h.render().connection, "connected");
+  assert.deepEqual(h.requests[0], {});
+  assert.equal(h.requests[1].failedTransportGeneration, 1);
+  assert.equal(h.requests[2].failedTransportGeneration, 1);
+  assert.notEqual(h.requests[1].failureEventId, h.requests[2].failureEventId);
+  assert.deepEqual(h.requests[3], {});
+  assert.equal(h.rooms[0].connections.at(-1), "wss://backup.test");
+  assert.equal(h.render().draft, "Still my draft");
+  assert.equal(h.rooms[0].localParticipant.sent.length, 0);
+});
+
+test("an authorization-related LiveKit connect error never reports provider failure", async () => {
+  const ready = { status: 200, ok: true,
+    json: async () => ({ serverUrl: "wss://primary.test", token: "jwt", transportGeneration: 1 }) };
+  const h = sessionHarness("/interview/api/token", [], [ready, ready], 1, 0);
+  await h.render().start("text");
+  assert.equal(h.render().connection, "failed");
+  await h.render().reconnect();
+  assert.equal(h.render().connection, "connected");
+  assert.deepEqual(h.requests, [{}, {}]);
 });
 
 test("real typed input waits for durable evidence ack and reuses its event ID on retry", async () => {

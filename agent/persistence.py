@@ -79,11 +79,20 @@ class EvidenceWriter:
     async def claim(cls, api: SupabaseEvidenceAPI, room: str, identity: str) -> "EvidenceWriter":
         if not REAL_ROOM.fullmatch(room):
             raise EvidenceError("Not a real interview room")
-        rows = await api.request("GET", "/conversations?select=id,participant_id,livekit_room,status,consented_at"
-                                 "&livekit_room=eq." + quote(room, safe="") + "&limit=2")
+        profile_id = os.getenv("QALVI_LIVEKIT_PROFILE_ID")
+        if os.getenv("LIVEKIT_AGENT_NAME") and not profile_id:
+            raise EvidenceError("Named worker requires a Qalvi LiveKit profile identifier")
+        if profile_id is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", profile_id):
+            raise EvidenceError("Invalid worker LiveKit profile identifier")
+        fields = "id,participant_id,livekit_room,status,consented_at"
+        if profile_id is not None:
+            fields += ",livekit_profile_id"
+        rows = await api.request("GET", "/conversations?select=" + fields
+                                 + "&livekit_room=eq." + quote(room, safe="") + "&limit=2")
         if len(rows) != 1 or rows[0]["livekit_room"] != room or not rows[0]["consented_at"] or \
                 identity != "participant-" + rows[0]["participant_id"] or \
-                rows[0]["status"] not in ("pending", "in_progress", "interrupted"):
+                rows[0]["status"] not in ("pending", "in_progress", "interrupted") or \
+                (profile_id is not None and rows[0]["livekit_profile_id"] != profile_id):
             raise EvidenceError("Interview room does not match a writable participant session")
         # A token issued before expiry might still join; the agent rejects that case.
         resumes = await api.request("GET", "/interview_resumes?select=id&conversation_id=eq."

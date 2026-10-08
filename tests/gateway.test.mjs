@@ -22,6 +22,7 @@ const gateway = load("../src/lib/interview/gateway.ts", {
   "server-only": {},
   "node:crypto": await import("node:crypto"),
   "@/lib/supabase/secret": { createSupabaseSecretClient: () => { throw Error("Unexpected admin client"); } },
+  "./livekitProfiles": { loadLiveKitProfiles: () => [] },
 });
 
 test("consent form accepts opaque Origin only with same-origin navigation metadata", () => {
@@ -105,6 +106,28 @@ test("claim uses a distinct resume hash and a server-generated real room", async
   assert.equal(await gateway.claimInvitation("forged", admin), null);
 });
 
+test("explicit profile mode never claims through the legacy RPC, even with legacy keys present", async () => {
+  const profiles = load("../src/lib/interview/livekitProfiles.ts", { "server-only": {} });
+  const hardenedGateway = load("../src/lib/interview/gateway.ts", {
+    "server-only": {}, "node:crypto": await import("node:crypto"),
+    "@/lib/supabase/secret": { createSupabaseSecretClient: () => { throw Error("Unexpected admin client"); } },
+    "./livekitProfiles": profiles,
+  });
+  const previous = process.env.LIVEKIT_PROFILE_IDS;
+  const admin = { async rpc(name) { assert.equal(name, "claim_interview_invitation_with_profile");
+    return { data: "conversation-1", error: null }; } };
+  const invitation = gateway.newCapability();
+  try {
+    process.env.LIVEKIT_PROFILE_IDS = "";
+    await assert.rejects(hardenedGateway.claimInvitation(invitation, admin), /Invalid LiveKit profile identifiers/);
+    process.env.LIVEKIT_PROFILE_IDS = "missing";
+    await assert.rejects(hardenedGateway.claimInvitation(invitation, admin), /Invalid LiveKit profile configuration/);
+  } finally {
+    if (previous === undefined) delete process.env.LIVEKIT_PROFILE_IDS;
+    else process.env.LIVEKIT_PROFILE_IDS = previous;
+  }
+});
+
 test("invitation preview reveals study context without consuming the capability", async () => {
   const invitation = gateway.newCapability();
   const reads = [];
@@ -177,9 +200,10 @@ class FakeResponse {
   static redirect(url, status) { return new FakeResponse(null, { status, url }); }
 }
 
-function request(url, { origin = "http://localhost:3000", cookie = {} } = {}) {
+function request(url, { origin = "http://localhost:3000", cookie = {}, body = {} } = {}) {
   return { url, headers: new Headers(origin ? { origin } : {}),
     cookies: { get: (name) => name in cookie ? { value: cookie[name] } : undefined },
+    async json() { return body; },
     async formData() { return new Map(); } };
 }
 
@@ -259,6 +283,13 @@ test("real LiveKit token ignores browser-chosen scope and refuses a missing resu
   const { POST } = load("../src/app/interview/api/token/route.ts", {
     "next/server": { NextResponse: FakeResponse },
     "livekit-server-sdk": { AccessToken: FakeAccessToken, TrackSource: { MICROPHONE: 2 } },
+    "@/lib/supabase/secret": { createSupabaseSecretClient: () => { throw Error("Unexpected admin client"); } },
+    "@/lib/interview/livekitProfiles": { loadLiveKitProfiles: () => [{
+      id: "primary", priority: 0, enabled: true, serverUrl: "wss://example.test",
+      apiKey: "test-key", apiSecret: "test-secret", agentName: null, deployment: null,
+    }] },
+    "@/lib/interview/livekitFailures": { LiveKitProviderFailure: class extends Error {} },
+    "@/lib/interview/livekitRouter": { routeLiveKitTransport: () => { throw Error("Unexpected router"); } },
     "@/lib/interview/gateway": { ...gateway,
       resolveParticipant: async (token) => token === "valid" || token === "resumed" ? {
         participant_id: "p-1", livekit_room: "qalvi-real-from-db", status: "pending",
@@ -288,5 +319,101 @@ test("real LiveKit token ignores browser-chosen scope and refuses a missing resu
     assert.ok(!JSON.stringify(allowed.body).includes("test-secret"));
   } finally {
     [process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, process.env.LIVEKIT_URL] = previous;
+  }
+});
+
+test("multi-profile token signs only the database-selected project's room and hides credentials", async () => {
+  const calls = [];
+  const reports = [];
+  let reportError = false;
+  class FakeAccessToken {
+    constructor(key, secret, options) { calls.push({ key, secret, options }); }
+    addGrant(grant) { calls.at(-1).grant = grant; }
+    async toJwt() { return "participant-jwt"; }
+  }
+  const primary = { id: "primary", enabled: true, serverUrl: "wss://primary.test",
+    apiKey: "primary-key", apiSecret: "primary-secret", agentName: "qalvi-interview" };
+  const backup = { id: "backup_1", enabled: true, serverUrl: "wss://backup.test",
+    apiKey: "backup-key", apiSecret: "backup-secret", agentName: "qalvi-interview" };
+  const state = { id: "conversation-1", livekit_profile_id: "backup_1",
+    livekit_room: "qalvi-real-backup-room", transport_generation: 2,
+    writer_generation: 0, status: "pending" };
+  const { POST } = load("../src/app/interview/api/token/route.ts", {
+    "next/server": { NextResponse: FakeResponse },
+    "livekit-server-sdk": { AccessToken: FakeAccessToken, TrackSource: { MICROPHONE: 2 } },
+    "@/lib/supabase/secret": { createSupabaseSecretClient: () => ({
+      async rpc(name, args) { reports.push([name, args]); return {
+        data: reportError ? null : 1, error: reportError ? { code: "stale" } : null,
+      }; },
+    }) },
+    "@/lib/interview/gateway": { RESUME_COOKIE: gateway.RESUME_COOKIE,
+      sameOrigin: gateway.sameOrigin,
+      resolveParticipant: async (cookie) => cookie === "valid" ? {
+        id: "conversation-1", participant_id: "participant-1",
+        livekit_room: "old-room", writer_generation: 0 } : null,
+      readParticipantTransport: async () => state },
+    "@/lib/interview/livekitProfiles": { loadLiveKitProfiles: () => [primary, backup],
+      assignmentTimeoutMs: () => 45_000 },
+    "@/lib/interview/livekitFailures": { LiveKitProviderFailure: class extends Error {} },
+    "@/lib/interview/livekitRouter": { routeLiveKitTransport: async () => ({
+      kind: "ready", profile: backup, state,
+    }) },
+  });
+  const previous = process.env.LIVEKIT_PROFILE_IDS;
+  process.env.LIVEKIT_PROFILE_IDS = "primary,backup_1";
+  try {
+    const unauthorized = await POST(request("http://localhost:3000/interview/api/token", {
+      body: { failedTransportGeneration: 2, failureEventId: "11111111-1111-4111-8111-111111111111" },
+    }));
+    assert.equal(unauthorized.status, 401);
+    assert.equal(reports.length, 0);
+    const response = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    } }));
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].key, "backup-key");
+    assert.equal(calls[0].secret, "backup-secret");
+    assert.equal(calls[0].grant.room, state.livekit_room);
+    assert.equal(response.body.serverUrl, backup.serverUrl);
+    assert.equal(response.body.roomName, state.livekit_room);
+    assert.equal(response.body.transportGeneration, 2);
+    for (const secret of ["primary-key", "primary-secret", "backup-key", "backup-secret"]) {
+      assert.ok(!JSON.stringify(response.body).includes(secret));
+    }
+    const failedEventId = "11111111-1111-4111-8111-111111111111";
+    const reported = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    }, body: { failedTransportGeneration: 2, failureEventId: failedEventId,
+      conversationId: "attacker-conversation", roomName: "attacker-room",
+      nextProfileId: "attacker-project" } }));
+    assert.equal(reported.status, 200);
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0][0], "report_interview_transport_connection_failure");
+    assert.equal(reports[0][1].p_conversation_id, "conversation-1");
+    assert.equal(reports[0][1].p_generation, 2);
+    assert.equal(reports[0][1].p_event_id, failedEventId);
+    const malformed = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    }, body: { failedTransportGeneration: "2", failureEventId: failedEventId } }));
+    assert.equal(malformed.status, 400);
+    assert.equal(reports.length, 1);
+    reportError = true;
+    const stale = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    }, body: { failedTransportGeneration: 1, failureEventId: failedEventId } }));
+    assert.equal(stale.status, 200);
+    const currentFailure = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    }, body: { failedTransportGeneration: 2, failureEventId: failedEventId } }));
+    assert.equal(currentFailure.status, 409);
+    state.writer_generation = 1;
+    const afterWriter = await POST(request("http://localhost:3000/interview/api/token", { cookie: {
+      [gateway.RESUME_COOKIE]: "valid",
+    }, body: { failedTransportGeneration: 2, failureEventId: failedEventId } }));
+    assert.equal(afterWriter.status, 409);
+  } finally {
+    if (previous === undefined) delete process.env.LIVEKIT_PROFILE_IDS;
+    else process.env.LIVEKIT_PROFILE_IDS = previous;
   }
 });

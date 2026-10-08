@@ -319,6 +319,106 @@ and Supabase's default grants revoked, so a partial rollout exposes nothing.
 | `20260923000300_access_policies.sql` | Membership helpers, column grants, policies, `create_workspace`, `create_finding` |
 | `20260924000100_live_interview_foundation.sql` | Hashed invitation/resume capabilities, consent and lifecycle, writer fencing, ordered idempotent append RPCs, issued/rendered visual provenance |
 | `20260927000100_interview_recovery_foundation.sql` | New-protocol participant marker, immutable control decisions, scoped service-only recovery read (2B.4A) |
+| `20260929000100_livekit_profile_routing.sql` | LiveKit profile alias/generation, preparation lease, service-only pre-evidence transport rotation; applied remotely; live primary-to-backup failover accepted 2026-10-08 |
+| `20261007000100_control_cascade_cleanup.sql` | Allow derived-control deletion only when its canonical parent is already absent during authorized cleanup; applied remotely 2026-10-07 |
+
+### LiveKit project profiles (Stage 2B.4A, accepted 2026-10-08)
+
+The real participant's resume capability resolves one Qalvi conversation. The
+conversation owns canonical evidence and stores only a LiveKit profile alias,
+room, transport generation, preparation/assignment timestamps, and safe failure
+reason. It never stores LiveKit keys or participant tokens. The Next.js server
+loads an ordered list of complete project profiles; one selected profile supplies
+the room API, dispatch API, URL and signing credentials together. Each project
+must already run its own Qalvi worker, named `qalvi-interview` (or the matching
+configured name), with `QALVI_LIVEKIT_PROFILE_ID` set to its alias. The worker
+checks that alias against the conversation before claiming the fenced writer.
+
+With `LIVEKIT_PROFILE_IDS` unset, the existing unnamed automatic-dispatch path
+and legacy `LIVEKIT_*` variables remain in place. If that variable is present,
+including an empty value, Qalvi never falls back to legacy real-interview
+dispatch. Every enabled configured profile requires its own URL, key, secret,
+and named agent; invalid or unknown profile IDs and duplicate priorities fail
+validation. An empty enabled set is unavailable. The demo route remains a
+separate legacy preview. With named profiles enabled,
+the server creates a room and dedicated explicit dispatch, then waits up to the
+configured assignment timeout for a RUNNING job with a worker ID. A database
+preparation lease prevents concurrent requests from issuing duplicate dispatches;
+an abandoned lease can be reclaimed and the existing dispatch reused. The
+participant token is issued only after assignment. A 202 response means the
+same cookie-scoped session is still preparing or has moved to the next profile;
+the browser retries the token request without choosing a project. Provider quota,
+transport failure, service 5xx, disabled profile, or assignment timeout can move
+the pending conversation to a fresh room in the next eligible project. The
+rotation RPC compares profile, room, generation and lease, and refuses a session
+with a claimed writer or canonical message. Authorization, schema and application
+errors do not trigger failover.
+Two distinct browser-reported WebRTC connect failures for the same pending
+generation can also trigger rotation. The service-only RPC counts stable report
+IDs idempotently, verifies the cookie-resolved conversation and rejects a
+claimed writer or any evidence. A single failure retries the same project.
+Browser reports are advisory and affect only their cookie-scoped conversation.
+The server chooses the destination; it never maintains browser-controlled
+global profile health. A confirmed generation is not redispatched on repeated
+token requests. Each eligible enabled profile is attempted at most once, so N
+profiles permit at most N assignment attempts and N-1 rotations. The default
+worker-assignment wait is 45 seconds per attempted profile, making the nominal
+assignment-wait ceiling N x 45 seconds, plus provider API setup and browser
+retry overhead. The browser stops preparation after 10 minutes, though an
+in-flight token request may finish up to 150 seconds later. There is no
+persistent server-side aggregate routing deadline yet. A stricter wall-clock
+SLA would require a conversation-scoped deadline checked before each attempt.
+
+This does not resume an in-progress interview across projects. The safe future
+boundary is a durable participant message and control decision, followed by
+replacement-worker transcript/control reconstruction. Stage 2B.4B has not built
+that replacement path; uncertain assistant delivery is not regenerated here.
+The linked primary gateway passed profile claim, transport preparation,
+assignment confirmation and token issuance on 2026-10-07. The named primary
+joined and wrote real canonical evidence. Its previous availability failure
+did not recur, so this did not exercise backup rotation or close Stage 2B.4A.
+The initial read-only migration-history refresh timed out; no new remote migration was
+applied in that initial pass. The later corrective worker build passed primary
+same-worker recovery; live two-project failover still requires acceptance before
+calling Stage 2B.4A complete. The forward control-cascade correction is now
+applied remotely without changing RLS or function grants.
+
+Live failover acceptance (Acceptance B, 2026-10-08) then forced a real primary
+assignment failure without touching either deployment: only the Next.js
+server's primary agent target was overridden, for one server run, to a name no
+worker serves. The server created the primary room (departure 150 s, empty
+180 s) and a named dispatch that LiveKit left without a job. After the 45-second
+wait the router raised `assignment_timeout`, the rotation RPC moved the same
+participant and conversation from `primary`/generation 1 to `backup_1`/generation 2
+with a new room, and the browser received 202 after 53 s. Its next token request
+created the backup room and dispatch `qalvi-interview-backup-1`; the sleeping
+backup worker cold-started and was assigned 10.3 s after dispatch, and the token
+returned 200 after 16.6 s. The backup worker claimed writer generation 1 against
+the `backup_1` conversation, wrote the opening, then a typed participant turn
+with message acknowledgement, control acknowledgement and reply generation in
+that order. No participant ever joined the primary room and its probe dispatch
+never received a job. Live probes confirmed the old room maps to no conversation,
+and stale generation-1 rotation, rotation of the active session, and a stale
+generation-1 lease are all refused. The primary target was restored afterwards.
+
+LiveKit Cloud also attaches an automatic unnamed dispatch when the server creates
+a room. It stays jobless only because every worker in a profile project is
+registered with a name. Do not deploy an unnamed worker into a profile project:
+it would join every interview room alongside the named worker.
+
+Deployment assumptions: the Next.js server holds every profile's URL, key,
+secret, agent name, priority and enabled flag, plus
+`LIVEKIT_ASSIGNMENT_TIMEOUT_MS` (45000), and the token route may run for up to
+150 s. Each LiveKit project runs exactly one named worker deployment whose
+`LIVEKIT_AGENT_NAME` and `QALVI_LIVEKIT_PROFILE_ID` match its profile: primary
+`qalvi-interview-primary` (deployment `UUEPp5yezJfq`) and `backup_1`
+`qalvi-interview-backup-1` (`3QzkQUTG44KT`). Workers may scale to zero; a cold
+start must fit inside the assignment wait. Workers hold the agent-only Supabase
+secret; browsers and participant routes never do.
+
+A job that LiveKit marks FAILED before assignment, with a message other than a
+recognised quota error, is still treated as an application error and does not
+fail over. That case was not observed; revisit it if a real outage reports it.
 
 Stage 2B.4A adds a recovery boundary for real interview rooms. The agent writes
 a version-1 canonical participant message, waits for its database
@@ -344,6 +444,46 @@ while LiveKit token issuance remains restricted to writable statuses. The
 agent's claimed writer generation determines opening freshness, so a stale
 browser token hint cannot replay a greeting. A browser refresh never
 regenerates a missing assistant reply.
+
+Same-worker browser refresh requires `RoomOptions.close_on_disconnect=False`
+for real sessions: the SDK otherwise closes on `CLIENT_INITIATED` even while
+the agent participant remains in the room. Qalvi now gives only the saved
+participant identity a 120-second reconnect grace. Rejoining cancels the timer;
+duplicate disconnects and other identities do not reset it. Expiry interrupts
+the evidence writer and closes the job. No inactivity reply is generated while
+that participant is disconnected. This preserves one worker's context and
+does not implement replacement-worker reconstruction. Named real rooms also
+set `departureTimeout: 150`: LiveKit counts standard participants for room
+retention, so retaining an agent session alone does not retain its room.
+The initial corrective retest lost its room after about 25 seconds, before
+the agent's 120-second grace. After the room-retention correction, a second
+fresh session reconnected to the same room/writer and completed a new typed
+turn and assistant reply. Canonical sequence and deterministic control replay
+passed (Acceptance A). Two-project failover then passed separately
+(Acceptance B, above).
+
+Real sessions start with `record=False`. LiveKit Cloud jobs request recording,
+and the SDK would otherwise enable Cloud audio recording, trace and log export,
+and transcript upload. Participant consent covers Qalvi's canonical transcript
+only. Qalvi's own evidence path and stdout runtime logs are unaffected.
+
+Known limitations, deferred to Stage 2B.4B:
+- A worker lost mid-interview is not replaced. After grace expiry (or a worker
+  lost after assignment but before a writer exists), the participant can still
+  obtain a token and join a room with no agent; after the 150-second retention
+  LiveKit may recreate the room name without a dispatch. No evidence is written
+  in either case.
+- The agent never marks a conversation `completed`. A natural close is recorded
+  as `interrupted` when the 120-second grace expires, and the worker stays
+  allocated for that grace.
+- A job shutdown that races grace expiry can cancel the interrupt write, leaving
+  the status `in_progress`.
+- Cancellation denies new tokens and canonical writes but does not eject an
+  already connected participant.
+- Mid-interview cross-project failover is not implemented; there is no persisted
+  aggregate routing deadline.
+- Quota-classified failover is covered by unit tests only; the live run
+  exercised `assignment_timeout`.
 
 ```
 auth.users 1-1 profiles

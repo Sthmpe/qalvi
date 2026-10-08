@@ -24,14 +24,26 @@ export type Database = {
           interrupted_at: string | null
           interviewer_metadata: Json
           livekit_room: string | null
+          livekit_profile_id: string
           next_message_sequence: number
           participant_id: string
           started_at: string
           status: string
           study_id: string
+          transport_changed_at: string
+          transport_connection_failure_ids: string[]
+          transport_connection_failures: number
+          transport_failed_profiles: string[]
+          transport_failure_reason: string | null
+          transport_generation: number
+          transport_preparation_at: string | null
+          transport_preparation_nonce: string | null
+          transport_provider: string
+          transport_ready_at: string | null
           updated_at: string
           workspace_id: string
           writer_generation: number
+          previous_livekit_profile_id: string | null
         }
         Insert: {
           consent_version?: string | null
@@ -42,14 +54,26 @@ export type Database = {
           interrupted_at?: string | null
           interviewer_metadata?: Json
           livekit_room?: string | null
+          livekit_profile_id?: string
           next_message_sequence?: number
           participant_id: string
           started_at?: string
           status?: string
           study_id: string
+          transport_changed_at?: string
+          transport_connection_failure_ids?: string[]
+          transport_connection_failures?: number
+          transport_failed_profiles?: string[]
+          transport_failure_reason?: string | null
+          transport_generation?: number
+          transport_preparation_at?: string | null
+          transport_preparation_nonce?: string | null
+          transport_provider?: string
+          transport_ready_at?: string | null
           updated_at?: string
           workspace_id: string
           writer_generation?: number
+          previous_livekit_profile_id?: string | null
         }
         Update: {
           consent_version?: string | null
@@ -60,14 +84,26 @@ export type Database = {
           interrupted_at?: string | null
           interviewer_metadata?: Json
           livekit_room?: string | null
+          livekit_profile_id?: string
           next_message_sequence?: number
           participant_id?: string
           started_at?: string
           status?: string
           study_id?: string
+          transport_changed_at?: string
+          transport_connection_failure_ids?: string[]
+          transport_connection_failures?: number
+          transport_failed_profiles?: string[]
+          transport_failure_reason?: string | null
+          transport_generation?: number
+          transport_preparation_at?: string | null
+          transport_preparation_nonce?: string | null
+          transport_provider?: string
+          transport_ready_at?: string | null
           updated_at?: string
           workspace_id?: string
           writer_generation?: number
+          previous_livekit_profile_id?: string | null
         }
         Relationships: [
           {
@@ -762,6 +798,66 @@ export type Database = {
           p_resume_hash: string
         }
         Returns: string
+      }
+      claim_interview_invitation_with_profile: {
+        Args: {
+          p_consent_version: string
+          p_invitation_hash: string
+          p_livekit_profile_id: string
+          p_livekit_room: string
+          p_resume_hash: string
+        }
+        Returns: string
+      }
+      reserve_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_lease_seconds: number
+          p_nonce: string
+          p_profile_id: string
+        }
+        Returns: boolean
+      }
+      confirm_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_nonce: string
+          p_profile_id: string
+        }
+        Returns: boolean
+      }
+      report_interview_transport_connection_failure: {
+        Args: {
+          p_conversation_id: string
+          p_event_id: string
+          p_generation: number
+        }
+        Returns: number
+      }
+      rotate_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_next_profile_id: string
+          p_next_room: string
+          p_nonce: string
+          p_profile_id: string
+          p_reason: string
+          p_room: string
+        }
+        Returns: number
+      }
+      fail_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_nonce: string
+          p_profile_id: string
+          p_reason: string
+        }
+        Returns: boolean
       }
       create_finding: {
         Args: {

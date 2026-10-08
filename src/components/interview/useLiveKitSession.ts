@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
+import { ConnectionErrorReason, ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import type { ConnectionStatus, InputMode, InterviewStatus, TranscriptMessage } from "./types";
 import { readTranscript, transcriptId, upsertTranscript } from "./transcription";
 import { sessionHealth } from "./sessionHealth";
@@ -27,6 +27,17 @@ function mapAgentState(state: string | undefined): InterviewStatus | null {
     case "speaking": return "speaking";
     default: return null;
   }
+}
+
+function providerConnectFailure(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const failure = error as { reason?: unknown; status?: unknown; context?: { status?: unknown } };
+  if (typeof failure.status === "number" && failure.status >= 400 && failure.status < 500) return false;
+  if (failure.reason === ConnectionErrorReason.ServerUnreachable ||
+      failure.reason === ConnectionErrorReason.Timeout ||
+      failure.reason === ConnectionErrorReason.WebSocket) return true;
+  return failure.reason === ConnectionErrorReason.InternalError &&
+    typeof failure.context?.status === "number" && failure.context.status >= 500;
 }
 
 export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialRecovery?: RecoverySnapshot) {
@@ -400,20 +411,51 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     const identity = `participant-${crypto.randomUUID()}`;
     const roomName = `qalvi-demo-${crypto.randomUUID()}`;
     let joining = false;
+    let connectFailure: { generation: number; eventId: string } | null = null;
     const join = async () => {
       if (!current() || joining) return;
       joining = true;
       changeConnection("connecting");
       setError(null);
+      let connectionError = "Could not connect. Check your connection and try reconnecting. Your draft is kept here.";
       try {
-        const res = await fetch(tokenEndpoint, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(realSession ? {} : { roomName, identity, resume: hasConnected }), signal: AbortSignal.timeout(15000),
-        });
-        if (!res.ok) throw new Error("Could not reach the interview server.");
-        const { serverUrl, token } = await res.json() as { serverUrl: string; token: string };
+        let res: Response | null = null;
+        // A multi-profile server can return 202 while it waits for a named
+        // worker or moves this same conversation to another LiveKit project.
+        // Each request is bounded; the participant never selects a profile.
+        const preparationDeadline = Date.now() + (realSession ? 10 * 60_000 : 15_000);
+        do {
+          const report = connectFailure;
+          res = await fetch(tokenEndpoint, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(realSession
+              ? report ? { failedTransportGeneration: report.generation, failureEventId: report.eventId } : {}
+              : { roomName, identity, resume: hasConnected }),
+            signal: AbortSignal.timeout(realSession ? 150_000 : 15_000),
+          });
+          if (report && (res.ok || res.status === 202)) connectFailure = null;
+          if (res.status !== 202) break;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } while (current() && Date.now() < preparationDeadline);
+        if (res?.status === 503 && realSession) {
+          connectionError = "An interview worker is unavailable right now. Your conversation and draft are saved. Try reconnecting.";
+        }
+        if (!res || res.status === 202 || !res.ok) throw new Error("Could not reach the interview server.");
+        const { serverUrl, token, transportGeneration } = await res.json() as { serverUrl: string; token: string;
+          transportGeneration?: number };
         if (!current()) return;
-        await room.connect(serverUrl, token);
+        // LiveKit's Room instance owns only the active transport. Reusing it
+        // after a failed join keeps transcript/draft and all event handlers.
+        if (room.state && room.state !== ConnectionState.Disconnected) await room.disconnect();
+        try {
+          await room.connect(serverUrl, token);
+        } catch (connectError) {
+          if (realSession && !hasConnected && typeof transportGeneration === "number" &&
+              providerConnectFailure(connectError)) {
+            connectFailure = { generation: transportGeneration, eventId: crypto.randomUUID() };
+          }
+          throw connectError;
+        }
         if (!current()) { void room.disconnect(); return; }
         setIsActive(true);
         hasConnected = true;
@@ -436,7 +478,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       } catch {
         if (!current()) return;
         changeConnection("failed");
-        setError("Could not connect. Check your connection and try reconnecting. Your draft is kept here.");
+        setError(connectionError);
       } finally {
         joining = false;
       }

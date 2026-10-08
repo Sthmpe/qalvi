@@ -117,6 +117,23 @@ Raw interview evidence is the source of truth. Findings must not replace message
 
 M2.5 demonstrates this with sample messages and explicit finding-to-message links, not generated agent findings. M4 Stage 1 defines durable guarantees in the database: immutable messages, on-screen answers stored as both a message and a structured response, and findings that must cite supporting messages (see ARCHITECTURE, M4 persistence foundation). Stage 2B.3 implements canonical voice/text and assistant transcript writes for real interview rooms. Stage 2B.4A adds a versioned control record after each new-protocol participant message and before reply generation, plus browser reconstruction from saved messages. Visual evidence writes and AI findings generation remain unimplemented; the researcher sample screens are unchanged.
 
+The LiveKit profile routing (accepted with Stage 2B.4A on 2026-10-08) moves only
+the transport. A fresh consented conversation is assigned a server-side LiveKit
+project profile; a quota or worker-assignment failure can move it to a new
+room/project only before the agent claims a writer or any canonical message
+exists. The same participant, conversation, resume capability and evidence
+sequence remain authoritative. Live acceptance moved one fresh session from the
+primary project to the backup after a real 45-second assignment timeout; the
+backup worker then claimed the writer and produced the opening and a typed turn
+in canonical order.
+
+A browser refresh reconnects to the same worker within a 120-second grace owned
+by the saved participant identity; the room is retained for 150 seconds after the
+participant leaves so it outlives that grace. Nothing is replayed or regenerated.
+An established interview does not move projects, and a lost worker is not
+replaced: replacement worker replay, uncertainty handling, natural completion
+status and cancellation ejection belong to Stage 2B.4B.
+
 M3 adds on-screen answers as evidence: a participant's tap, slider value, or selection becomes a participant message in the same transcript, marked as given on screen. The `display` field in the structured response above is realised as a `DisplayAction` with four types. In M3 application code decides whether and when a predefined visual appears; the LLM is told what is on screen and asked to respond neutrally, and it does not choose or author visuals.
 
 ## Conversational control (M3)

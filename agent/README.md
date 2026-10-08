@@ -72,11 +72,24 @@ python main.py console
 
 ## Required environment variables
 
+For real-interview multi-profile routing, deploy this same agent separately to
+each independent LiveKit project. Set `LIVEKIT_AGENT_NAME` to the matching
+Next.js profile's `AGENT_NAME` and `QALVI_LIVEKIT_PROFILE_ID` to its alias on
+that worker. Each worker needs its own project's LiveKit credentials and the
+same Qalvi Supabase/Groq configuration. LiveKit Cloud injects its project's
+`LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` into deployed workers.
+The Next.js server holds all configured project credentials and creates named
+explicit dispatches; it never deploys workers at runtime. The worker refuses a
+real room whose database profile alias differs from its own. Demo rooms and
+the legacy unnamed single-project configuration keep their existing behavior.
+
 | Variable | Purpose |
 |---|---|
 | `LIVEKIT_URL` | Your LiveKit Cloud/server WebSocket URL |
 | `LIVEKIT_API_KEY` | LiveKit API key (server-side only) |
 | `LIVEKIT_API_SECRET` | LiveKit API secret (server-side only) |
+| `LIVEKIT_AGENT_NAME` | Named explicit-dispatch worker in multi-profile mode; leave unset for legacy automatic dispatch |
+| `QALVI_LIVEKIT_PROFILE_ID` | This worker's profile alias, checked against the database before a real writer claim |
 | `GROQ_API_KEY` | Groq API key for STT (Whisper), the LLM, and TTS |
 | `SUPABASE_URL` | Qalvi Supabase project URL for real interview persistence |
 | `SUPABASE_SECRET_KEY` | Agent-only `sb_secret_` key for privileged evidence RPCs |
@@ -100,6 +113,23 @@ fails, the agent pauses rather than generating an unsaved or unsupported reply.
 `recovery.py` can verify conductor replay from canonical participant messages
 and their control records without running classification again. It is not yet
 wired into replacement-worker startup; that remains Stage 2B.4B.
+
+Real sessions override LiveKit's immediate close on participant disconnect.
+The same participant may reconnect to the same worker within 120 seconds,
+preserving its chat and conductor state. Other identities and repeated
+disconnect notifications cannot extend that deadline. Expiry interrupts the
+conversation and shuts down the job; it never starts a replacement worker or
+resends a message. Demo disconnect behavior is unchanged. This narrow refresh
+fix passed a 2026-10-07 same-worker refresh/reconnect live retest. The server
+must also create named real rooms with a 150-second departure timeout so
+LiveKit does not destroy the room before the worker's 120-second grace expires.
+
+`session.start(record=False)` explicitly disables SDK Cloud session recording,
+including audio. Do not inherit a Cloud job's recording flag from an omitted
+argument. Canonical transcript evidence still goes only through Qalvi's trusted
+persistence gate. The corrected source is deployed on both existing profiles;
+primary runtime logs confirmed recording is off. Backup failover/recovery has
+not yet been exercised and the stage remains open.
 
 ## Development latency diagnostics
 

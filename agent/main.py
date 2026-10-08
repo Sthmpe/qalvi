@@ -38,6 +38,7 @@ from persistence import (REAL_ROOM, EvidenceError, EvidenceWriter,
 from turn_input import handle_text_input
 from presence import check_in_allowed, inactivity_prompt, next_check_at
 from recovery import control_data
+from reconnect import ReconnectGrace, REFRESH_GRACE_SECONDS
 from signals import Exchange, classify
 from speech import SpeechFilter
 from visuals import DEMO_GOAL, DISPLAY_TOPIC, demo_steps_for_room
@@ -313,18 +314,40 @@ async def entrypoint(ctx: JobContext):
     if writer:
         ctx.add_shutdown_callback(close_evidence)
 
+    async def expire_refresh_grace() -> None:
+        try:
+            await agent.pause_evidence()
+        finally:
+            try:
+                await session.aclose()
+            finally:
+                ctx.shutdown(reason="Participant refresh grace expired")
+
+    reconnect_grace = ReconnectGrace(real_participant.identity, expire_refresh_grace) \
+        if real_participant else None
+    if reconnect_grace:
+        ctx.add_shutdown_callback(reconnect_grace.close)
+
     def participant() -> rtc.RemoteParticipant | None:
         return next(iter(ctx.room.remote_participants.values()), None)
 
     # Active time: exclude disconnection, failures, and absence beyond the grace period.
     @ctx.room.on("participant_disconnected")
     def on_participant_left(_participant: rtc.RemoteParticipant) -> None:
+        if reconnect_grace and not reconnect_grace.disconnected(_participant.identity):
+            return
         logger.info("[qalvi failure] %s", json.dumps({"kind": signaling_failure().kind, "recoverable": True}))
         clock.begin_exclusion("disconnected")
+        if reconnect_grace:
+            logger.info("[qalvi recovery] phase=grace_started seconds=%d", REFRESH_GRACE_SECONDS)
 
     @ctx.room.on("participant_connected")
     def on_participant_joined(_participant: rtc.RemoteParticipant) -> None:
+        if reconnect_grace and not reconnect_grace.connected(_participant.identity):
+            return
         clock.end_exclusion("disconnected")
+        if reconnect_grace:
+            logger.info("[qalvi recovery] phase=participant_reconnected")
 
     voice = {"available": True, "task": None}
 
@@ -378,6 +401,8 @@ async def entrypoint(ctx: JobContext):
             if due is None:
                 return
             await asyncio.sleep(max(0.0, idle_since + due - time.monotonic()))
+            if reconnect_grace and real_participant.identity not in ctx.room.remote_participants:
+                return
             if not check_in_allowed(session.user_state == "away", session.agent_state == "listening",
                                     conductor.pending_visual()):
                 return
@@ -406,8 +431,13 @@ async def entrypoint(ctx: JobContext):
     await session.start(
         agent=agent,
         room=ctx.room,
-        room_options=RoomOptions(text_input=TextInputOptions(text_input_cb=on_text_input)),
+        record=False,  # transcript consent does not authorize Cloud audio/session recording
+        room_options=RoomOptions(text_input=TextInputOptions(text_input_cb=on_text_input),
+                                 close_on_disconnect=not real),
     )
+    if real:
+        logger.info("[qalvi recovery] phase=session_started close_on_disconnect=false grace_seconds=%d recording_enabled=%s",
+                    REFRESH_GRACE_SECONDS, any(session._opts.recording_options.values()))
     wait_for_opening = (lambda: ctx.wait_for_participant(identity=real_participant.identity)) \
         if real_participant else ctx.wait_for_participant
     if not await opening.start(session, wait_for_opening,
