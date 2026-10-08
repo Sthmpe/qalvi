@@ -5,7 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import { createSupabaseSecretClient } from "@/lib/supabase/secret";
 import { liveKitApiUrl, loadLiveKitProfiles, type LiveKitProfile } from "./livekitProfiles";
-import { classifyLiveKitFailure } from "./livekitFailures";
+import { classifyLiveKitFailure, withProviderDeadline } from "./livekitFailures";
 
 type Client = SupabaseClient<Database>;
 
@@ -41,12 +41,12 @@ const liveKit: LiveKitClients = {
 export async function dispatchReplacementWorker(profile: LiveKitProfile, room: string, clients = liveKit) {
   if (!profile.agentName) throw new Error("Named LiveKit worker is not configured.");
   const rooms = clients.rooms(profile);
-  if (!(await rooms.listRooms([room])).length) {
-    try { await rooms.createRoom({ name: room, ...ROOM_RETENTION }); }
-    catch (error) { if (!(await rooms.listRooms([room])).length) throw error; }
+  if (!(await withProviderDeadline(rooms.listRooms([room]))).length) {
+    try { await withProviderDeadline(rooms.createRoom({ name: room, ...ROOM_RETENTION })); }
+    catch (error) { if (!(await withProviderDeadline(rooms.listRooms([room]))).length) throw error; }
   }
   const dispatches = clients.dispatches(profile);
-  for (const existing of await dispatches.listDispatch(room)) {
+  for (const existing of await withProviderDeadline(dispatches.listDispatch(room))) {
     if (existing.agentName !== profile.agentName) continue;
     const jobs = existing.state?.jobs ?? [];
     // A pending job is an assignment already in flight: reuse it.
@@ -55,10 +55,10 @@ export async function dispatchReplacementWorker(profile: LiveKitProfile, room: s
     // stops at its next heartbeat. Keep it, but still dispatch a replacement.
     if (jobs.some((job) => job.state?.status === 1)) continue;
     // An ended or jobless dispatch can never start a new job.
-    await dispatches.deleteDispatch(existing.id, room).catch(() => undefined);
+    await withProviderDeadline(dispatches.deleteDispatch(existing.id, room)).catch(() => undefined);
   }
-  const created = await dispatches.createDispatch(room, profile.agentName,
-    profile.deployment ? { deployment: profile.deployment } : undefined);
+  const created = await withProviderDeadline(dispatches.createDispatch(room, profile.agentName,
+    profile.deployment ? { deployment: profile.deployment } : undefined));
   return created.id;
 }
 
@@ -142,7 +142,7 @@ export async function drainLifecycleOutbox(options: {
       profiles ??= loadLiveKitProfiles();
       const profile = profiles.find((candidate) => candidate.id === row.livekit_profile_id);
       if (!profile) throw new Error("profile not configured");
-      await clients.rooms(profile).deleteRoom(row.livekit_room);
+      await withProviderDeadline(clients.rooms(profile).deleteRoom(row.livekit_room));
       succeeded = true;
     } catch (deleteError) {
       if ((deleteError as { status?: unknown }).status === 404) succeeded = true;

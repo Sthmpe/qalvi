@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
 import type { LiveKitProfile } from "./livekitProfiles";
 import { liveKitApiUrl } from "./livekitProfiles";
-import { classifyLiveKitFailure, LiveKitProviderFailure, type LiveKitFailureReason } from "./livekitFailures";
+import { classifyLiveKitFailure, LiveKitProviderFailure, withProviderDeadline,
+  type LiveKitFailureReason } from "./livekitFailures";
 
 export type TransportState = {
   id: string;
@@ -101,30 +102,32 @@ export async function assignNamedWorker(profile: LiveKitProfile, roomName: strin
   const host = liveKitApiUrl(profile);
   const rooms = new RoomServiceClient(host, profile.apiKey, profile.apiSecret);
   const dispatches = new AgentDispatchClient(host, profile.apiKey, profile.apiSecret);
-  const existingRooms = await rooms.listRooms([roomName]);
+  const deadline = Date.now() + timeoutMs;
+  // Every provider call is bounded; none may outlast this assignment attempt.
+  const bounded = <T,>(call: Promise<T>) => withProviderDeadline(call, Math.min(12_000, deadline - Date.now()));
+  const existingRooms = await bounded(rooms.listRooms([roomName]));
   if (!existingRooms.length) {
     // Agents do not keep a room alive after its last standard participant
     // leaves. Retain the room beyond the worker's 120-second refresh grace.
-    try { await rooms.createRoom({ name: roomName, emptyTimeout: 180, departureTimeout: 150 }); }
+    try { await bounded(rooms.createRoom({ name: roomName, emptyTimeout: 180, departureTimeout: 150 })); }
     catch (error) {
       // Another request may have created it. Do not convert an unrelated 4xx
       // into a failover: prove the room now exists before continuing.
-      if (!(await rooms.listRooms([roomName])).length) throw error;
+      if (!(await bounded(rooms.listRooms([roomName]))).length) throw error;
     }
   }
-  let matches = (await dispatches.listDispatch(roomName))
+  let matches = (await bounded(dispatches.listDispatch(roomName)))
     .filter((dispatch) => dispatch.agentName === profile.agentName);
   if (matches.length > 1) throw new Error("Duplicate LiveKit dispatches for interview room.");
   if (!matches.length) {
-    const created = await dispatches.createDispatch(roomName, profile.agentName,
-      profile.deployment ? { deployment: profile.deployment } : undefined);
+    const created = await bounded(dispatches.createDispatch(roomName, profile.agentName,
+      profile.deployment ? { deployment: profile.deployment } : undefined));
     matches = [created];
   }
   const dispatchId = matches[0].id;
-  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     let dispatch: Awaited<ReturnType<AgentDispatchClient["getDispatch"]>>;
-    try { dispatch = await dispatches.getDispatch(dispatchId, roomName); }
+    try { dispatch = await bounded(dispatches.getDispatch(dispatchId, roomName)); }
     catch (error) {
       // A dispatch that vanished after creation is a lost provider resource,
       // not a malformed browser request (the browser supplies neither ID).

@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED. Stage 2B.4B has not started.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; it remains OPEN pending human device acceptance and the browser UI for its states.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -292,6 +292,43 @@ loss; after grace expiry a participant can rejoin a room with no agent; natural
 completion is recorded as `interrupted`; a shutdown racing grace expiry can leave
 `in_progress`; cancellation does not eject a connected participant; no
 mid-interview cross-project failover. Stage 2B.4B is not started.
+
+**Stage 2B.4B: OPEN (implemented and automated-live-accepted 2026-10-08).**
+Branch `stage-2b4b-lifecycle` from the accepted 2B.4A checkpoint. Migrations
+`20261008000100` (writer lease, recovery reservation, opening marker, terminal
+transition, ejection outbox) and `20261009000100` (heartbeat reports
+server-recorded endings to the current writer) are applied remotely; linked lint
+passed. Primary `6UsqFczaqMPv` and backup `8su99bUN5iL3` run the 2B.4B worker
+(previous versions `UUEPp5yezJfq` and `3QzkQUTG44KT` remain available for rollback).
+
+Delivered:
+- a server-clock writer lease (30 s, 10 s heartbeat); no lease stealing; the
+  takeover reservation fences the lapsed generation at once
+- replacement dispatch into the conversation's own room and project from the
+  token route and `POST /interview/api/recover`; bounded, at most three attempts
+- reconstruction from canonical rows and durable controls without
+  reclassification; each crash boundary handled (uncontrolled turn answered once,
+  controlled turn never regenerated, durable opening marker, saved reply resumes)
+- `completed` on participant end or natural close, `cancelled` by researcher,
+  `failed` on damaged history, `interrupted` otherwise; `ended_at` and reasons
+- ejection through a durable outbox with backoff and through the worker's own
+  heartbeat; `POST /interview/api/end`, researcher cancel, scheduler drain route
+- every LiveKit server call bounded so a slow region fails over instead of hanging
+- every early worker exit shuts the job down; grace expiry checks real presence
+- the UI lifecycle contract for Codex in ARCHITECTURE
+
+Automated live acceptance: one continuous session 18/18 (fresh lease, heartbeat,
+refresh without takeover, boundaries 4, 2 and 3, fencing, researcher cancel and
+ejection, terminal refusal), participant end 3/3, worker-side ejection with an
+undrained outbox 3/3, and post-grace replacement without re-greeting. Validation:
+Node 131/131 (database/RLS 48), Python 127/127, TypeScript, lint, build.
+
+Remaining before closure: a human microphone/device session; a voice-turn
+replacement; a replacement inside the backup project; Codex implementing the
+lifecycle contract (the current client shows "response delayed" after a
+`resumed` recovery); a scheduler for `/api/internal/lifecycle-outbox` in
+deployment. Mid-interview cross-project failover and an aggregate routing deadline
+remain out of scope.
 
 Store:
 - studies

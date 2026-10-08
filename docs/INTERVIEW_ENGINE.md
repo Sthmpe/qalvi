@@ -134,6 +134,17 @@ An established interview does not move projects, and a lost worker is not
 replaced: replacement worker replay, uncertainty handling, natural completion
 status and cancellation ejection belong to Stage 2B.4B.
 
+Stage 2B.4B (implemented, stage open) adds a replacement interviewer. When the
+interviewer's worker is lost, a new one takes over the same room and continues
+from saved evidence only: its decisions are replayed, not re-made. If the last
+saved participant turn has no saved decision, no reply can have begun, so it is
+answered once. If the decision was saved, the reply may already have been heard
+and is never repeated; Qalvi waits for the participant. The greeting is never
+repeated once it may have been heard. A participant can end the interview
+(`completed`), a researcher can cancel it (`cancelled`), and a conversation that
+closed naturally completes when the participant leaves. Damaged saved history ends
+the interview as `failed` rather than continuing on guesses.
+
 M3 adds on-screen answers as evidence: a participant's tap, slider value, or selection becomes a participant message in the same transcript, marked as given on screen. The `display` field in the structured response above is realised as a `DisplayAction` with four types. In M3 application code decides whether and when a predefined visual appears; the LLM is told what is on screen and asked to respond neutrally, and it does not choose or author visuals.
 
 ## Conversational control (M3)

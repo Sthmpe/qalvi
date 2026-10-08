@@ -14,7 +14,7 @@ function load(file, dependencies) {
   vm.runInNewContext(compiled, { exports, require(name) {
     assert.ok(name in dependencies, `Unexpected import: ${name}`);
     return dependencies[name];
-  }, process, Date, setTimeout });
+  }, process, Date, setTimeout, clearTimeout });
   return exports;
 }
 

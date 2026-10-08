@@ -26,3 +26,22 @@ export function classifyLiveKitFailure(error: unknown): LiveKitProviderFailure |
   }
   return null;
 }
+
+/** Upper bound for one LiveKit server API call, including the SDK's own region failover. */
+export const LIVEKIT_CALL_TIMEOUT_MS = 12_000;
+
+/**
+ * Bound a LiveKit server API call. The SDK retries other regions on transport
+ * errors, so one call can otherwise outlast the whole assignment window while a
+ * token request holds its preparation lease. A call that does not settle in time
+ * is a provider failure: a pending session may fail over, a recovery or ejection
+ * retries in its next window. The abandoned call is not awaited.
+ */
+export function withProviderDeadline<T>(call: Promise<T>, ms = LIVEKIT_CALL_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new LiveKitProviderFailure("transport_unavailable")), Math.max(1, ms));
+  });
+  call.catch(() => undefined); // a late rejection after the deadline must not go unhandled
+  return Promise.race([call, deadline]).finally(() => clearTimeout(timer));
+}

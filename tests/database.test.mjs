@@ -1071,7 +1071,11 @@ describe("writer lease, replacement recovery and terminal lifecycle (2B.4B)", ()
     await assert.rejects(claimLease(conversation, room, "AJ_late"), /cannot accept a writer/);
     await assert.rejects(append(conversation, 1, "text:late", "Too late"), /not writable by this generation/);
     assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id, null);
-    await assert.rejects(heartbeat(conversation, 1, "AJ_end"), /stale conversation writer/);
+    // The ending cleared the holder's job ID, yet the current generation still learns
+    // the terminal status, so the worker ejects from its own project too.
+    assert.deepEqual(await heartbeat(conversation, 1, "AJ_end"), { status: "completed", leaseExpiresAt: null });
+    // A generation that was replaced is only ever told it is stale; it never ejects.
+    await assert.rejects(heartbeat(conversation, 0, "AJ_end"), /stale conversation writer/);
     const snapshot = (await pipeline(() => one(
       "select public.read_participant_interview_recovery($1) as s", [resume]))).s;
     assert.deepEqual([snapshot.status, snapshot.endReason, snapshot.writerActive],

@@ -644,3 +644,65 @@ the history table does not store. `20261007000100` is byte-identical.
 Stage 2B.4A is CLOSED. Stage 2B.4B (replacement worker after worker loss,
 post-grace orphan rooms, natural completion status, the `in_progress` shutdown
 boundary, cancellation ejection) has not started.
+
+## 2026-10-08 — Stage 2B.4B: writer lease, replacement recovery and interview endings
+
+Stage 2B.4A was integrated into master by fast-forward (`136b214..1357341`, no
+force, no history rewrite; the corrupt `.git/ORIG_HEAD` was avoided by updating
+refs with push and fetch rather than repaired). Stage 2B.4B is developed on
+`stage-2b4b-lifecycle`.
+
+Decision: liveness is a server-clock lease, fencing stays the generation. A
+worker claims a 30-second lease for its LiveKit job and renews it every 10
+seconds. Another job can never take a live lease. A lapsed or released lease lets
+the server reserve one takeover per 90-second window (three consecutive attempts
+at most); the reservation itself advances the generation, so a lapsed writer that
+wakes up cannot write between the decision and the replacement's claim. Older
+deployed workers keep using the previous claim while no lease is held and can
+never take a live one.
+
+Decision: a replacement continues only from durable state. It replays saved
+controls (no reclassification) and rebuilds model context from canonical rows.
+The control record is the gate before any reply, so a saved participant turn
+without a control is classified and answered once; a turn with a control may have
+been answered aloud and is never regenerated. The greeting gets the same rule
+through a durable opening marker written before it is generated. Damaged history
+ends the interview as `failed` (`recovery_integrity`) rather than improvising.
+
+Decision: one idempotent terminal authority. `end_interview_conversation` sets
+`ended_at`, an end reason, clears the lease and enqueues room ejection in one
+transaction. Participant end and natural close are `completed`; researcher
+cancellation (and ending a never-started interview) is `cancelled`. Ejection runs
+through a durable outbox with backoff (abandoned after ten attempts, retained for
+review) using each room's own project credentials, and independently through the
+worker's own heartbeat. A scheduler must call `/api/internal/lifecycle-outbox`
+with `QALVI_INTERNAL_TASK_SECRET` in deployment; requests that end an interview
+also drain it at once. LiveKit tokens cannot be revoked; the 5-minute TTL bounds
+an already-issued token, and no writer can be claimed for a terminal session.
+
+Live acceptance found two defects, both fixed before the recorded runs: the
+heartbeat answered a server-recorded ending with "stale" (the ending had cleared
+the job ID), so the worker never ejected on its own; forward migration
+`20261009000100` reports the terminal status to the current generation. And the
+LiveKit server SDK's region failover let one API call outlast the assignment
+window while a token request held its preparation lease; every LiveKit call is
+now bounded and a timeout is a failover-eligible provider failure. A worker that
+returns from its entrypoint keeps its job connected in LiveKit Agents 1.8, so every
+early exit now shuts the job down.
+
+Automated live acceptance on primary `6UsqFczaqMPv` (backup `8su99bUN5iL3`
+deployed identically), typed turns in headless Chrome, crash boundaries created
+through the service role: conversation `10f6b13d-fc40-42cd-b7b4-f8e8fb24af78`
+(participant `a51b79e9-5967-4018-898a-892d2be7ecd1`) passed 18/18 through writer
+generation 7 with 8 canonical rows and 4 controls, then researcher cancellation
+ejected its room within a second. `157ad0b5-cfb4-44de-aacf-2e33443e91ac` passed
+participant end. `914c6a6e-c1a0-43ae-a08b-2ef7b907684b` passed worker-side ejection
+in 9.5 s with the outbox drained afterwards by the scheduler route. A session
+left past its grace was `interrupted` with the lease released and resumed by a
+replacement without re-greeting. The disposable researcher, workspace, study,
+conversations and rooms were removed; all checked table counts returned to
+baseline.
+
+Not done: human microphone/device acceptance, a voice-turn replacement, a
+replacement inside the backup project, and the browser UI for the new states
+(Codex; contract in ARCHITECTURE). Stage 2B.4B is OPEN.

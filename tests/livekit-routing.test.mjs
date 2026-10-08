@@ -13,7 +13,7 @@ function load(file, dependencies, globals = {}) {
   vm.runInNewContext(compiled, { exports, require(name) {
     assert.ok(name in dependencies, `Unexpected import: ${name}`);
     return dependencies[name];
-  }, process, Date, setTimeout, ...globals });
+  }, process, Date, setTimeout, clearTimeout, ...globals });
   return exports;
 }
 
@@ -343,4 +343,23 @@ test("a dispatch resource lost after creation is provider-unavailable", async ()
   });
   await assert.rejects(namedRouter.assignNamedWorker(profilesModule.loadLiveKitProfiles(config())[0],
     "qalvi-real-test-room", 35_000), /transport_unavailable/);
+});
+
+test("a LiveKit API call that never settles is a bounded provider failure, not a hung token request", async () => {
+  const started = Date.now();
+  await assert.rejects(failures.withProviderDeadline(new Promise(() => {}), 30), /transport_unavailable/);
+  assert.ok(Date.now() - started < 1000);
+  class HangingRooms { listRooms() { return new Promise(() => {}); } }
+  class Dispatches {}
+  const namedRouter = load("../src/lib/interview/livekitRouter.ts", {
+    "server-only": {}, "node:crypto": await import("node:crypto"),
+    "livekit-server-sdk": { RoomServiceClient: HangingRooms, AgentDispatchClient: Dispatches },
+    "./livekitProfiles": profilesModule, "./livekitFailures": failures,
+  });
+  const profiles = profilesModule.loadLiveKitProfiles(config());
+  const backend = store();
+  const result = await namedRouter.routeLiveKitTransport(profiles, backend, 60,
+    (profile, room, timeout) => namedRouter.assignNamedWorker(profile, room, timeout));
+  assert.equal(result.kind, "retry");
+  assert.deepEqual(backend.changes.find((entry) => entry[0] === "rotate").slice(1), ["transport_unavailable", "backup_1"]); // failed over to the next project
 });
