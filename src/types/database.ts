@@ -19,14 +19,17 @@ export type Database = {
           consent_version: string | null
           consented_at: string | null
           created_at: string
+          end_reason: string | null
           ended_at: string | null
           id: string
           interrupted_at: string | null
           interviewer_metadata: Json
-          livekit_room: string | null
           livekit_profile_id: string
+          livekit_room: string | null
           next_message_sequence: number
+          opening_started_at: string | null
           participant_id: string
+          previous_livekit_profile_id: string | null
           started_at: string
           status: string
           study_id: string
@@ -43,20 +46,29 @@ export type Database = {
           updated_at: string
           workspace_id: string
           writer_generation: number
-          previous_livekit_profile_id: string | null
+          writer_heartbeat_at: string | null
+          writer_job_id: string | null
+          writer_lease_expires_at: string | null
+          writer_recovery_at: string | null
+          writer_recovery_attempts: number
+          writer_recovery_nonce: string | null
+          writer_transport_generation: number | null
         }
         Insert: {
           consent_version?: string | null
           consented_at?: string | null
           created_at?: string
+          end_reason?: string | null
           ended_at?: string | null
           id?: string
           interrupted_at?: string | null
           interviewer_metadata?: Json
-          livekit_room?: string | null
           livekit_profile_id?: string
+          livekit_room?: string | null
           next_message_sequence?: number
+          opening_started_at?: string | null
           participant_id: string
+          previous_livekit_profile_id?: string | null
           started_at?: string
           status?: string
           study_id: string
@@ -73,20 +85,29 @@ export type Database = {
           updated_at?: string
           workspace_id: string
           writer_generation?: number
-          previous_livekit_profile_id?: string | null
+          writer_heartbeat_at?: string | null
+          writer_job_id?: string | null
+          writer_lease_expires_at?: string | null
+          writer_recovery_at?: string | null
+          writer_recovery_attempts?: number
+          writer_recovery_nonce?: string | null
+          writer_transport_generation?: number | null
         }
         Update: {
           consent_version?: string | null
           consented_at?: string | null
           created_at?: string
+          end_reason?: string | null
           ended_at?: string | null
           id?: string
           interrupted_at?: string | null
           interviewer_metadata?: Json
-          livekit_room?: string | null
           livekit_profile_id?: string
+          livekit_room?: string | null
           next_message_sequence?: number
+          opening_started_at?: string | null
           participant_id?: string
+          previous_livekit_profile_id?: string | null
           started_at?: string
           status?: string
           study_id?: string
@@ -103,7 +124,13 @@ export type Database = {
           updated_at?: string
           workspace_id?: string
           writer_generation?: number
-          previous_livekit_profile_id?: string | null
+          writer_heartbeat_at?: string | null
+          writer_job_id?: string | null
+          writer_lease_expires_at?: string | null
+          writer_recovery_at?: string | null
+          writer_recovery_attempts?: number
+          writer_recovery_nonce?: string | null
+          writer_transport_generation?: number | null
         }
         Relationships: [
           {
@@ -288,6 +315,62 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "studies"
             referencedColumns: ["id", "workspace_id"]
+          },
+        ]
+      }
+      interview_lifecycle_outbox: {
+        Row: {
+          abandoned_at: string | null
+          attempts: number
+          completed_at: string | null
+          conversation_id: string
+          created_at: string
+          id: string
+          kind: string
+          last_error: string | null
+          livekit_profile_id: string
+          livekit_room: string
+          lock_nonce: string | null
+          locked_at: string | null
+          next_attempt_at: string
+        }
+        Insert: {
+          abandoned_at?: string | null
+          attempts?: number
+          completed_at?: string | null
+          conversation_id: string
+          created_at?: string
+          id?: string
+          kind: string
+          last_error?: string | null
+          livekit_profile_id: string
+          livekit_room: string
+          lock_nonce?: string | null
+          locked_at?: string | null
+          next_attempt_at?: string
+        }
+        Update: {
+          abandoned_at?: string | null
+          attempts?: number
+          completed_at?: string | null
+          conversation_id?: string
+          created_at?: string
+          id?: string
+          kind?: string
+          last_error?: string | null
+          livekit_profile_id?: string
+          livekit_room?: string
+          lock_nonce?: string | null
+          locked_at?: string | null
+          next_attempt_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interview_lifecycle_outbox_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "conversations"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -809,15 +892,15 @@ export type Database = {
         }
         Returns: string
       }
-      reserve_interview_transport: {
+      claim_interview_writer_lease: {
         Args: {
           p_conversation_id: string
-          p_generation: number
+          p_job_id: string
           p_lease_seconds: number
-          p_nonce: string
+          p_livekit_room: string
           p_profile_id: string
         }
-        Returns: boolean
+        Returns: Json
       }
       confirm_interview_transport: {
         Args: {
@@ -825,37 +908,6 @@ export type Database = {
           p_generation: number
           p_nonce: string
           p_profile_id: string
-        }
-        Returns: boolean
-      }
-      report_interview_transport_connection_failure: {
-        Args: {
-          p_conversation_id: string
-          p_event_id: string
-          p_generation: number
-        }
-        Returns: number
-      }
-      rotate_interview_transport: {
-        Args: {
-          p_conversation_id: string
-          p_generation: number
-          p_next_profile_id: string
-          p_next_room: string
-          p_nonce: string
-          p_profile_id: string
-          p_reason: string
-          p_room: string
-        }
-        Returns: number
-      }
-      fail_interview_transport: {
-        Args: {
-          p_conversation_id: string
-          p_generation: number
-          p_nonce: string
-          p_profile_id: string
-          p_reason: string
         }
         Returns: boolean
       }
@@ -870,6 +922,34 @@ export type Database = {
         Returns: string
       }
       create_workspace: { Args: { workspace_name: string }; Returns: string }
+      end_interview_conversation: {
+        Args: {
+          p_conversation_id: string
+          p_reason: string
+          p_status: string
+          p_writer_generation?: number
+        }
+        Returns: string
+      }
+      fail_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_nonce: string
+          p_profile_id: string
+          p_reason: string
+        }
+        Returns: boolean
+      }
+      heartbeat_interview_writer: {
+        Args: {
+          p_conversation_id: string
+          p_job_id: string
+          p_lease_seconds: number
+          p_writer_generation: number
+        }
+        Returns: Json
+      }
       issue_interview_visual: {
         Args: {
           p_conversation_id: string
@@ -877,6 +957,34 @@ export type Database = {
           p_writer_generation: number
         }
         Returns: string
+      }
+      lease_interview_lifecycle_outbox: {
+        Args: { p_limit: number; p_lock_seconds: number; p_nonce: string }
+        Returns: {
+          abandoned_at: string | null
+          attempts: number
+          completed_at: string | null
+          conversation_id: string
+          created_at: string
+          id: string
+          kind: string
+          last_error: string | null
+          livekit_profile_id: string
+          livekit_room: string
+          lock_nonce: string | null
+          locked_at: string | null
+          next_attempt_at: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "interview_lifecycle_outbox"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      mark_interview_opening: {
+        Args: { p_conversation_id: string; p_writer_generation: number }
+        Returns: boolean
       }
       read_participant_interview_recovery: {
         Args: {
@@ -898,8 +1006,64 @@ export type Database = {
         }
         Returns: string
       }
+      release_interview_writer: {
+        Args: {
+          p_conversation_id: string
+          p_job_id: string
+          p_writer_generation: number
+        }
+        Returns: boolean
+      }
+      report_interview_transport_connection_failure: {
+        Args: {
+          p_conversation_id: string
+          p_event_id: string
+          p_generation: number
+        }
+        Returns: number
+      }
+      reserve_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_lease_seconds: number
+          p_nonce: string
+          p_profile_id: string
+        }
+        Returns: boolean
+      }
+      reserve_interview_writer_recovery: {
+        Args: {
+          p_conversation_id: string
+          p_nonce: string
+          p_window_seconds: number
+        }
+        Returns: string
+      }
       resolve_interview_resume: {
         Args: { p_resume_hash: string }
+        Returns: string
+      }
+      rotate_interview_transport: {
+        Args: {
+          p_conversation_id: string
+          p_generation: number
+          p_next_profile_id: string
+          p_next_room: string
+          p_nonce: string
+          p_profile_id: string
+          p_reason: string
+          p_room: string
+        }
+        Returns: number
+      }
+      settle_interview_lifecycle_outbox: {
+        Args: {
+          p_error?: string
+          p_id: string
+          p_nonce: string
+          p_succeeded: boolean
+        }
         Returns: string
       }
       transition_interview_conversation: {

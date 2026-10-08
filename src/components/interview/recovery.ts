@@ -20,6 +20,11 @@ export interface RecoverySnapshot {
   replyUnconfirmed: boolean;
   controlPending: boolean;
   legacyHistory: boolean;
+  /** 2B.4B lifecycle facts (absent from servers before migration 20261008000100). */
+  endReason?: "participant_ended" | "interview_closed" | "researcher_cancelled" | "recovery_integrity" | null;
+  writerActive?: boolean;
+  recovering?: boolean;
+  openingUncertain?: boolean;
 }
 
 export const terminalInterview = (status: string) =>

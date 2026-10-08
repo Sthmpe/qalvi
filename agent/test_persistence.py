@@ -31,8 +31,11 @@ class FakeAPI:
 
     async def rpc(self, name, args):
         self.calls.append((name, args.copy()))
-        if name == "claim_conversation_writer":
-            return self.generation
+        if name == "claim_interview_writer_lease":
+            if getattr(self, "lease_held", False):
+                raise EvidenceError("Evidence database rejected the operation (409)", code="55P03")
+            return {"generation": self.generation, "renewed": False, "transportGeneration": 1,
+                    "openingStarted": getattr(self, "opening_started", False), "leaseExpiresAt": "later"}
         if name == "transition_interview_conversation":
             return "interrupted"
         if name == "record_interview_turn_control":
@@ -103,26 +106,70 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         room = "qalvi-real-00000000-0000-4000-8000-000000000001"
         with self.assertRaises(EvidenceError):
             await EvidenceWriter.claim(api, "qalvi-demo-00000000-0000-4000-8000-000000000001",
-                                       "participant-participant-1")
+                                       "participant-participant-1", "AJ_test")
         with self.assertRaises(EvidenceError):
-            await EvidenceWriter.claim(api, room, "participant-forged")
-        writer = await EvidenceWriter.claim(api, room, "participant-participant-1")
+            await EvidenceWriter.claim(api, room, "participant-forged", "AJ_test")
+        writer = await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_test")
         self.assertEqual(writer.conversation_id, "conversation-1")
         self.assertEqual(writer.generation, 2)
         self.assertEqual(api.calls[-1][1]["p_livekit_room"], room)
+
+    async def test_writer_lease_claim_carries_job_profile_and_lease(self):
+        api = FakeAPI()
+        api.opening_started = True
+        room = "qalvi-real-00000000-0000-4000-8000-000000000001"
+        with patch.dict("os.environ", {"QALVI_LIVEKIT_PROFILE_ID": "primary"}):
+            writer = await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_job", 30)
+        name, args = api.calls[-1]
+        self.assertEqual(name, "claim_interview_writer_lease")
+        self.assertEqual((args["p_job_id"], args["p_profile_id"], args["p_lease_seconds"],
+                          args["p_livekit_room"]), ("AJ_job", "primary", 30, room))
+        self.assertTrue(writer.opening_started)
+        self.assertEqual(writer.job_id, "AJ_job")
+        with self.assertRaises(EvidenceError):
+            await EvidenceWriter.claim(api, room, "participant-participant-1", "")
+
+    async def test_a_held_lease_is_reported_distinctly_so_the_worker_leaves_quietly(self):
+        api = FakeAPI()
+        api.lease_held = True
+        room = "qalvi-real-00000000-0000-4000-8000-000000000001"
+        with self.assertRaises(EvidenceError) as raised:
+            await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_second")
+        self.assertEqual(raised.exception.code, "55P03")
+
+    async def test_lifecycle_rpcs_are_fenced_by_generation_and_job(self):
+        api = SimpleNamespace(calls=[])
+
+        async def rpc(name, args):
+            api.calls.append((name, args))
+            return {"heartbeat_interview_writer": {"status": "in_progress", "leaseExpiresAt": "later"},
+                    "mark_interview_opening": True, "end_interview_conversation": "completed",
+                    "release_interview_writer": True}[name]
+        api.rpc = rpc
+        writer = EvidenceWriter(api, "conversation-1", 4, "AJ_job")
+        self.assertEqual(await writer.heartbeat(30), "in_progress")
+        self.assertTrue(await writer.mark_opening())
+        self.assertTrue(writer.opening_started)
+        self.assertEqual(await writer.end("completed", "interview_closed"), "completed")
+        await writer.release()
+        for name, args in api.calls:
+            self.assertEqual(args["p_conversation_id"], "conversation-1", name)
+            self.assertEqual(args["p_writer_generation"], 4, name)
+        self.assertEqual(api.calls[0][1]["p_job_id"], "AJ_job")
+        self.assertEqual(api.calls[2][1]["p_reason"], "interview_closed")
 
     async def test_worker_profile_must_match_database_transport_before_writer_claim(self):
         api = FakeAPI()
         room = "qalvi-real-00000000-0000-4000-8000-000000000001"
         with patch.dict("os.environ", {"LIVEKIT_AGENT_NAME": "qalvi-interview"}, clear=True):
             with self.assertRaises(EvidenceError):
-                await EvidenceWriter.claim(api, room, "participant-participant-1")
+                await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_test")
         with patch.dict("os.environ", {"QALVI_LIVEKIT_PROFILE_ID": "backup_1"}):
             with self.assertRaises(EvidenceError):
-                await EvidenceWriter.claim(api, room, "participant-participant-1")
+                await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_test")
         self.assertEqual(api.calls, [])
         with patch.dict("os.environ", {"QALVI_LIVEKIT_PROFILE_ID": "primary"}):
-            writer = await EvidenceWriter.claim(api, room, "participant-participant-1")
+            writer = await EvidenceWriter.claim(api, room, "participant-participant-1", "AJ_test")
         self.assertEqual(writer.generation, 2)
 
     async def test_voice_duplicate_text_and_assistant_are_ordered_once(self):

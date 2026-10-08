@@ -41,7 +41,7 @@ const SUPABASE = `
 const TABLES = [
   "profiles", "workspaces", "workspace_members", "studies", "participants", "conversations",
   "messages", "visual_displays", "visual_responses", "findings", "finding_evidence",
-  "interview_invitations", "interview_resumes", "interview_turn_controls",
+  "interview_invitations", "interview_resumes", "interview_turn_controls", "interview_lifecycle_outbox",
 ];
 
 const users = {
@@ -896,5 +896,249 @@ describe("LiveKit profile routing and transport fencing", () => {
     await assert.rejects(researcher("alice", () => db.query(
       "select public.report_interview_transport_connection_failure($1,2,$2)",
       [conversationId, randomUUID()])), /permission denied/);
+  });
+});
+
+describe("writer lease, replacement recovery and terminal lifecycle (2B.4B)", () => {
+  const hash = () => randomBytes(32).toString("hex");
+  const now = () => new Date().toISOString();
+  const LEASE = 30;
+  async function started({ profile = "primary" } = {}) {
+    const token = hash();
+    const resume = hash();
+    const room = `qalvi-real-${randomUUID()}`;
+    await pipeline(() => db.query(
+      "insert into interview_invitations(workspace_id, study_id, issued_by, token_hash) values ($1,$2,$3,$4)",
+      [ids.alpha, ids.alphaStudy, users.alice, token]));
+    const conversation = (await pipeline(() => one(
+      "select public.claim_interview_invitation_with_profile($1,$2,$3,'consent-v1',$4) as id",
+      [token, resume, room, profile]))).id;
+    return { conversation, room, resume };
+  }
+  const claimLease = (conversation, room, job, profile = "primary", seconds = LEASE) =>
+    pipeline(async () => (await one(
+      "select public.claim_interview_writer_lease($1,$2,$3,$4,$5) as lease",
+      [conversation, room, profile, job, seconds])).lease);
+  const heartbeat = (conversation, generation, job) => pipeline(async () => (await one(
+    "select public.heartbeat_interview_writer($1,$2,$3,$4) as beat", [conversation, generation, job, LEASE])).beat);
+  const append = (conversation, generation, key, content) => pipeline(() => one(
+    "select * from public.append_interview_message($1,$2,$3,'participant','text',$4,$5)",
+    [conversation, generation, key, content, now()]));
+  const expireLease = (conversation) => db.query(
+    "update conversations set writer_lease_expires_at = clock_timestamp() - interval '1 second' where id = $1",
+    [conversation]);
+  const reserve = (conversation) => pipeline(async () => (await one(
+    "select public.reserve_interview_writer_recovery($1,$2,60) as state", [conversation, randomUUID()])).state);
+  const end = (conversation, status, reason, generation = null) => pipeline(async () => (await one(
+    "select public.end_interview_conversation($1,$2,$3,$4) as status", [conversation, status, reason, generation])).status);
+  const state = (conversation) => one(
+    `select status, writer_generation, writer_job_id, writer_lease_expires_at, ended_at, end_reason,
+            opening_started_at, writer_recovery_attempts from conversations where id = $1`, [conversation]);
+
+  test("new lifecycle RPCs are security definer, pinned search path and service_role only", async () => {
+    for (const name of ["claim_interview_writer_lease", "heartbeat_interview_writer", "release_interview_writer",
+      "mark_interview_opening", "end_interview_conversation", "reserve_interview_writer_recovery",
+      "lease_interview_lifecycle_outbox", "settle_interview_lifecycle_outbox"]) {
+      const routine = await one(
+        `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = $1`, [name]);
+      assert.equal(routine.prosecdef, true, name);
+      assert.ok(routine.proconfig.some((setting) => setting.startsWith("search_path=")), name);
+      const permissions = await one(
+        `select has_function_privilege('anon', $1::regprocedure, 'EXECUTE') as anon,
+                has_function_privilege('authenticated', $1::regprocedure, 'EXECUTE') as researcher,
+                has_function_privilege('service_role', $1::regprocedure, 'EXECUTE') as service`, [routine.signature]);
+      assert.deepEqual(permissions, { anon: false, researcher: false, service: true }, name);
+    }
+    await assert.rejects(as("anon", null, () => db.query("select * from interview_lifecycle_outbox")),
+      /permission denied/);
+    await assert.rejects(researcher("alice", () => db.query("select * from interview_lifecycle_outbox")),
+      /permission denied/);
+  });
+
+  test("a live lease cannot be stolen; its holder renews idempotently", async () => {
+    const { conversation, room } = await started();
+    const first = await claimLease(conversation, room, "AJ_first");
+    assert.equal(first.generation, 1);
+    assert.equal(first.renewed, false);
+    assert.equal(first.openingStarted, false);
+    const renewed = await claimLease(conversation, room, "AJ_first");
+    assert.equal(renewed.generation, 1);
+    assert.equal(renewed.renewed, true);
+    await assert.rejects(claimLease(conversation, room, "AJ_thief"), /held by another worker/);
+    await assert.rejects(pipeline(() => db.query("select public.claim_conversation_writer($1,$2)",
+      [conversation, room])), /held by another worker/);
+    const beat = await heartbeat(conversation, 1, "AJ_first");
+    assert.equal(beat.status, "in_progress");
+    assert.ok(new Date(beat.leaseExpiresAt) > new Date());
+    await assert.rejects(heartbeat(conversation, 1, "AJ_thief"), /stale conversation writer/);
+    assert.equal(Number((await state(conversation)).writer_generation), 1);
+  });
+
+  test("the lease respects the conversation's current profile, room and resume capability", async () => {
+    const { conversation, room } = await started();
+    await assert.rejects(claimLease(conversation, room, "AJ_x", "backup_1"), /cannot accept a writer/);
+    await assert.rejects(claimLease(conversation, `qalvi-real-${randomUUID()}`, "AJ_x"), /cannot accept a writer/);
+    await assert.rejects(claimLease(conversation, room, "AJ_x", "primary", 5), /invalid writer lease request/);
+    await pipeline(() => db.query(
+      "update interview_resumes set revoked_at = clock_timestamp() where conversation_id = $1", [conversation]));
+    await assert.rejects(claimLease(conversation, room, "AJ_x"), /cannot accept a writer/);
+  });
+
+  test("an expired lease allows generation N+1, and the replaced worker can never write again", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_original");
+    await append(conversation, 1, "text:before", "Before the crash");
+    await expireLease(conversation);
+    const replacement = await claimLease(conversation, room, "AJ_replacement");
+    assert.equal(replacement.generation, 2);
+    await assert.rejects(append(conversation, 1, "text:late", "Late write"), /not writable by this generation/);
+    await assert.rejects(heartbeat(conversation, 1, "AJ_original"), /stale conversation writer/);
+    assert.equal((await append(conversation, 2, "text:after", "After takeover")).message_sequence, 1);
+    const release = (generation, job) => pipeline(async () => (await one(
+      "select public.release_interview_writer($1,$2,$3) as released", [conversation, generation, job])).released);
+    assert.equal(await release(1, "AJ_original"), false);
+    assert.equal(await release(2, "AJ_replacement"), true);
+    assert.equal((await state(conversation)).writer_job_id, null);
+  });
+
+  test("recovery reservation fences the lapsed writer at once and is bounded", async () => {
+    const { conversation, room } = await started();
+    assert.equal(await reserve(conversation), "unavailable"); // never started: transport routing owns it
+    await claimLease(conversation, room, "AJ_one");
+    assert.equal(await reserve(conversation), "active");
+    await expireLease(conversation);
+    assert.equal(await reserve(conversation), "reserved");
+    await assert.rejects(append(conversation, 1, "text:zombie", "Zombie write"), /not writable by this generation/);
+    assert.equal(await reserve(conversation), "recovering");
+    const claimed = await claimLease(conversation, room, "AJ_two");
+    assert.equal(claimed.generation, 3);
+    assert.equal((await state(conversation)).writer_recovery_attempts, 0);
+    await expireLease(conversation);
+    for (const expected of ["reserved", "reserved", "reserved", "exhausted"]) {
+      await db.query(
+        "update conversations set writer_recovery_at = writer_recovery_at - interval '10 minutes' where id = $1 and writer_recovery_at is not null",
+        [conversation]);
+      assert.equal(await reserve(conversation), expected);
+    }
+  });
+
+  test("the opening marker is written once and only by the current writer", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_open");
+    const mark = (generation) => pipeline(async () => (await one(
+      "select public.mark_interview_opening($1,$2) as first", [conversation, generation])).first);
+    assert.equal(await mark(1), true);
+    assert.equal(await mark(1), false);
+    await assert.rejects(mark(9), /not writable by this generation/);
+    await expireLease(conversation);
+    assert.equal((await claimLease(conversation, room, "AJ_next")).openingStarted, true);
+  });
+
+  test("recovery read exposes lifecycle facts without transport or tenant details", async () => {
+    const { conversation, room, resume } = await started();
+    const read = () => pipeline(async () => (await one(
+      "select public.read_participant_interview_recovery($1) as snapshot", [resume])).snapshot);
+    await claimLease(conversation, room, "AJ_read");
+    await pipeline(() => db.query("select public.mark_interview_opening($1,1)", [conversation]));
+    let snapshot = await read();
+    assert.equal(snapshot.writerActive, true);
+    assert.equal(snapshot.openingUncertain, true);
+    assert.equal(snapshot.recovering, false);
+    assert.equal(snapshot.endReason, null);
+    const text = JSON.stringify(snapshot);
+    for (const hidden of [room, "primary", "AJ_read", ids.alpha]) assert.equal(text.includes(hidden), false, hidden);
+    await append(conversation, 1, "text:first", "Hello");
+    snapshot = await read();
+    assert.equal(snapshot.openingUncertain, false);
+  });
+
+  test("terminal endings set ended_at, clear the lease, enqueue one ejection and are idempotent", async () => {
+    const { conversation, room, resume } = await started();
+    await claimLease(conversation, room, "AJ_end");
+    assert.equal(await end(conversation, "completed", "participant_ended"), "completed");
+    const ended = await state(conversation);
+    assert.equal(ended.status, "completed");
+    assert.equal(ended.end_reason, "participant_ended");
+    assert.ok(ended.ended_at);
+    assert.equal(ended.writer_job_id, null);
+    assert.equal(await end(conversation, "cancelled", "researcher_cancelled"), "completed");
+    const outbox = await rows(
+      "select kind, livekit_profile_id, livekit_room from interview_lifecycle_outbox where conversation_id = $1",
+      [conversation]);
+    assert.deepEqual(outbox, [{ kind: "eject_room", livekit_profile_id: "primary", livekit_room: room }]);
+    // Terminal blocks every path back in, but stays readable through the capability.
+    await assert.rejects(claimLease(conversation, room, "AJ_late"), /cannot accept a writer/);
+    await assert.rejects(append(conversation, 1, "text:late", "Too late"), /not writable by this generation/);
+    assert.equal((await pipeline(() => one("select public.resolve_interview_resume($1) as id", [resume]))).id, null);
+    await assert.rejects(heartbeat(conversation, 1, "AJ_end"), /stale conversation writer/);
+    const snapshot = (await pipeline(() => one(
+      "select public.read_participant_interview_recovery($1) as s", [resume]))).s;
+    assert.deepEqual([snapshot.status, snapshot.endReason, snapshot.writerActive],
+      ["completed", "participant_ended", false]);
+  });
+
+  test("stale worker endings are refused and only integrity failure may be 'failed'", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_hb");
+    await assert.rejects(end(conversation, "completed", "interview_closed", 7), /stale conversation writer/);
+    await assert.rejects(end(conversation, "completed", "recovery_integrity"), /invalid interview ending/);
+    await assert.rejects(end(conversation, "failed", "participant_ended"), /invalid interview ending/);
+    assert.equal(await end(conversation, "failed", "recovery_integrity", 1), "failed");
+    const pending = await started();
+    assert.equal(await end(pending.conversation, "completed", "participant_ended"), "cancelled");
+  });
+
+  test("a heartbeat on a terminal conversation reports the ending and clears the lease", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_t");
+    await db.query(`update conversations set status = 'cancelled', end_reason = 'researcher_cancelled',
+      ended_at = clock_timestamp() where id = $1`, [conversation]);
+    assert.deepEqual(await heartbeat(conversation, 1, "AJ_t"), { status: "cancelled", leaseExpiresAt: null });
+    assert.equal((await state(conversation)).writer_job_id, null);
+  });
+
+  test("the legacy worker transition releases the lease and enqueues ejection on terminal", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_legacy");
+    await pipeline(() => db.query("select public.transition_interview_conversation($1,1,'interrupted')", [conversation]));
+    assert.equal((await state(conversation)).writer_job_id, null);
+    await pipeline(() => db.query("select public.transition_interview_conversation($1,1,'completed')", [conversation]));
+    assert.equal((await rows("select 1 from interview_lifecycle_outbox where conversation_id = $1", [conversation])).length, 1);
+  });
+
+  test("ejection outbox leases due rows once, backs off failures, completes and finally abandons", async () => {
+    const { conversation, room } = await started();
+    await claimLease(conversation, room, "AJ_o");
+    await end(conversation, "completed", "participant_ended");
+    const due = (where = "conversation_id = $1", value = conversation) => db.query(
+      `update interview_lifecycle_outbox set next_attempt_at = clock_timestamp() - interval '1 second' where ${where}`, [value]);
+    await due();
+    const lease = (nonce) => pipeline(async () => (await rows(
+      "select * from public.lease_interview_lifecycle_outbox($1,50,60)", [nonce]))
+      .filter((row) => row.conversation_id === conversation));
+    const settle = (id, nonce, ok, error = null) => pipeline(async () => (await one(
+      "select public.settle_interview_lifecycle_outbox($1,$2,$3,$4) as result", [id, nonce, ok, error])).result);
+    const nonce = randomUUID();
+    const [job] = await lease(nonce);
+    assert.equal(job.livekit_room, room);
+    assert.deepEqual(await lease(randomUUID()), []); // locked by the first processor
+    assert.equal(await settle(job.id, randomUUID(), true), "stale");
+    assert.equal(await settle(job.id, nonce, false, "LiveKit 503"), "retry");
+    assert.deepEqual(await one(
+      "select attempts, next_attempt_at > clock_timestamp() as later, last_error from interview_lifecycle_outbox where id = $1",
+      [job.id]), { attempts: 1, later: true, last_error: "LiveKit 503" });
+    assert.deepEqual(await lease(randomUUID()), []); // not due yet
+    await due("id = $1", job.id);
+    const again = randomUUID();
+    await lease(again);
+    assert.equal(await settle(job.id, again, true), "completed");
+    assert.equal(await settle(job.id, again, true), "stale");
+    // A row that keeps failing is abandoned after ten attempts rather than retried forever.
+    await db.query(`update interview_lifecycle_outbox set completed_at = null, attempts = 9,
+      next_attempt_at = clock_timestamp() - interval '1 second' where id = $1`, [job.id]);
+    const last = randomUUID();
+    await lease(last);
+    assert.equal(await settle(job.id, last, false, "still failing"), "abandoned");
   });
 });

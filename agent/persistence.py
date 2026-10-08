@@ -18,9 +18,13 @@ EVENT_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
 class EvidenceError(Exception):
     """A canonical turn could not be confirmed as durable."""
 
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False, code: str | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.code = code  # PostgreSQL SQLSTATE from PostgREST, when the database answered
+
+
+LEASE_HELD = "55P03"  # lock_not_available: another live worker holds the writer lease
 
 
 def occurred_at(timestamp: float | None = None) -> str:
@@ -56,8 +60,15 @@ class SupabaseEvidenceAPI:
         try:
             async with self._session.request(method, self._base + path, json=body) as response:
                 if response.status >= 400:
+                    code = None
+                    try:
+                        body = await response.json()
+                        code = body.get("code") if isinstance(body, dict) else None
+                    except (aiohttp.ContentTypeError, ValueError):
+                        pass
                     raise EvidenceError(f"Evidence database rejected the operation ({response.status})",
-                                        retryable=response.status in (408, 429) or response.status >= 500)
+                                        retryable=response.status in (408, 429) or response.status >= 500,
+                                        code=code if isinstance(code, str) else None)
                 return await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise EvidenceError("Evidence database acknowledgement unavailable", retryable=True) from exc
@@ -67,16 +78,20 @@ class SupabaseEvidenceAPI:
 
 
 class EvidenceWriter:
-    def __init__(self, api: SupabaseEvidenceAPI, conversation_id: str, generation: int):
+    def __init__(self, api: SupabaseEvidenceAPI, conversation_id: str, generation: int,
+                 job_id: str = "", opening_started: bool = False):
         self.api = api
         self.conversation_id = conversation_id
         self.generation = generation
+        self.job_id = job_id
+        self.opening_started = opening_started
         self._lock = asyncio.Lock()
         self._events: dict[str, tuple[str, str, str, str, bool]] = {}
         self._saved: dict[str, SavedMessage] = {}
 
     @classmethod
-    async def claim(cls, api: SupabaseEvidenceAPI, room: str, identity: str) -> "EvidenceWriter":
+    async def claim(cls, api: SupabaseEvidenceAPI, room: str, identity: str, job_id: str,
+                    lease_seconds: int = 30) -> "EvidenceWriter":
         if not REAL_ROOM.fullmatch(room):
             raise EvidenceError("Not a real interview room")
         profile_id = os.getenv("QALVI_LIVEKIT_PROFILE_ID")
@@ -94,18 +109,79 @@ class EvidenceWriter:
                 rows[0]["status"] not in ("pending", "in_progress", "interrupted") or \
                 (profile_id is not None and rows[0]["livekit_profile_id"] != profile_id):
             raise EvidenceError("Interview room does not match a writable participant session")
-        # A token issued before expiry might still join; the agent rejects that case.
-        resumes = await api.request("GET", "/interview_resumes?select=id&conversation_id=eq."
-                                    + quote(rows[0]["id"], safe="") + "&revoked_at=is.null"
-                                    "&expires_at=gt." + quote(occurred_at(), safe="") + "&limit=1")
-        if not resumes:
-            raise EvidenceError("Interview resume has expired")
-        generation = await api.rpc("claim_conversation_writer", {
-            "p_conversation_id": rows[0]["id"], "p_livekit_room": room,
+        if not job_id:
+            raise EvidenceError("A writer lease requires the LiveKit job identifier")
+        # One atomic claim: active resume capability, current room/profile, and no
+        # other live lease. A live lease held by another job is never stolen.
+        lease = await api.rpc("claim_interview_writer_lease", {
+            "p_conversation_id": rows[0]["id"], "p_livekit_room": room, "p_profile_id": profile_id,
+            "p_job_id": job_id, "p_lease_seconds": lease_seconds,
         })
+        generation = lease.get("generation") if isinstance(lease, dict) else None
         if not isinstance(generation, int) or generation < 1:
             raise EvidenceError("Interview writer claim failed")
-        return cls(api, rows[0]["id"], generation)
+        return cls(api, rows[0]["id"], generation, job_id, bool(lease.get("openingStarted")))
+
+    async def heartbeat(self, lease_seconds: int = 30) -> str:
+        """Extend this writer's lease; returns the conversation status. Raises if replaced."""
+        beat = await self.api.rpc("heartbeat_interview_writer", {
+            "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+            "p_job_id": self.job_id, "p_lease_seconds": lease_seconds,
+        })
+        status = beat.get("status") if isinstance(beat, dict) else None
+        if not isinstance(status, str):
+            raise EvidenceError("Heartbeat acknowledgement malformed", retryable=True)
+        return status
+
+    async def release(self) -> None:
+        try:
+            await self.api.rpc("release_interview_writer", {
+                "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+                "p_job_id": self.job_id,
+            })
+        except EvidenceError:
+            pass  # an unreleased lease simply expires; a replacement waits for it
+
+    async def mark_opening(self) -> bool:
+        """Durably record that a greeting may now be generated. Must succeed first."""
+        first = await self.api.rpc("mark_interview_opening", {
+            "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+        })
+        if not isinstance(first, bool):
+            raise EvidenceError("Opening acknowledgement malformed")
+        self.opening_started = True
+        return first
+
+    async def end(self, status: str, reason: str) -> str:
+        """Terminal transition by this writer; idempotent, fenced by generation."""
+        result = await self.api.rpc("end_interview_conversation", {
+            "p_conversation_id": self.conversation_id, "p_status": status, "p_reason": reason,
+            "p_writer_generation": self.generation,
+        })
+        if not isinstance(result, str):
+            raise EvidenceError("Ending acknowledgement malformed")
+        return result
+
+    async def load_history(self, page_size: int = 500) -> tuple[list[dict], list[dict]]:
+        """Canonical rows in database sequence, and their durable control records."""
+        conversation = quote(self.conversation_id, safe="")
+        messages: list[dict] = []
+        while True:
+            page = await self.api.request(
+                "GET", "/messages?select=id,sequence,speaker,channel,content,interrupted,"
+                "transport_segment_id,control_protocol_version&conversation_id=eq." + conversation
+                + f"&order=sequence.asc&limit={page_size}&offset={len(messages)}")
+            if not isinstance(page, list):
+                raise EvidenceError("Canonical history malformed", retryable=True)
+            messages.extend(page)
+            if len(page) < page_size:
+                break
+        controls = await self.api.request(
+            "GET", "/interview_turn_controls?select=message_id,schema_version,methodology_version,"
+            "signals,decision_action,state_sha256&conversation_id=eq." + conversation)
+        if not isinstance(controls, list):
+            raise EvidenceError("Control history malformed", retryable=True)
+        return messages, controls
 
     async def append(self, key: str, speaker: str, channel: str, content: str,
                      timestamp: str, interrupted: bool = False) -> SavedMessage:
