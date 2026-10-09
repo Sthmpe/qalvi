@@ -745,3 +745,29 @@ complete and ready for final live acceptance. The checkpoint stays on
 stage-2b4b-ui; Stage 2B.4B remains OPEN and master is not merged. Focused
 interview, recovery and visual regressions passed again: 56/56. No application
 code changed after the full TypeScript, lint and production-build validation.
+
+## 2026-10-09 — Stage 2B.4B integration and final live acceptance
+
+Integrate on `stage-2b4b-integration` from `1b8a575` (UI on the `f522ea1` backend);
+neither source branch was rewritten. The UI matches the backend contract, so no
+lifecycle semantics changed.
+
+Decision: restore the public demo by named dispatch instead of deploying an unnamed
+worker. 2B.4A forbids unnamed workers in profile projects (they would join every
+interview room), which left the demo, still on automatic dispatch, without an
+interviewer. The demo token route now requests the named worker of the profile
+whose URL matches the legacy project, once per room. Real interviews are unaffected.
+
+Decision: Stage 2B.4B stays OPEN. Live real-browser acceptance passed for the
+lifecycle, cancellation, expiry, damaged history and a backup-project replacement,
+but human microphone acceptance and a spoken-turn replacement need a person, and
+the outbox scheduler needs a deployment that does not exist. No scheduler was
+configured against a local machine and called deployment.
+
+Recorded observations: one failed-path run in seven where the browser never
+requested recovery after the fenced worker left; one cold-start backup session that
+never joined although a job was assigned; and the inline drain serving the oldest
+five rows first, so an ending's own row can wait behind a backlog (the worker
+heartbeat still ejects its room). Harness assertions corrected during the run: the
+mid-session microphone failure uses its own wording, ejection is awaited rather
+than sampled, and LiveKit does not list a finished dispatch.

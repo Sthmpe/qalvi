@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
+import { loadLiveKitProfiles } from "@/lib/interview/livekitProfiles";
+import { dispatchDemoWorker } from "@/lib/interview/livekitRouter";
 
 /**
  * Mints a short-lived LiveKit room-join token for the participant browser.
@@ -42,6 +44,12 @@ export async function POST(request: NextRequest) {
     canPublishData: true,
     canSubscribe: true,
   });
+
+  try {
+    await dispatchDemoWorker(loadLiveKitProfiles(), serverUrl, roomName);
+  } catch {
+    return NextResponse.json({ error: "The demo interviewer is unavailable." }, { status: 503 });
+  }
 
   return NextResponse.json({
     serverUrl,

@@ -95,8 +95,27 @@ export async function routeLiveKitTransport(
   return { kind: "retry" };
 }
 
+/** The public demo still joins the legacy singleton project. When that project
+ * is also a configured profile, its only worker is named (an unnamed worker
+ * would join every interview room), so automatic dispatch never reaches the
+ * demo: ask for that profile's named worker instead. Does not wait for it. */
+export async function dispatchDemoWorker(profiles: LiveKitProfile[], legacyUrl: string, roomName: string) {
+  const profile = profiles.find((candidate) => candidate.agentName && candidate.serverUrl === legacyUrl);
+  if (!profile?.agentName) return;
+  const dispatches = new AgentDispatchClient(liveKitApiUrl(profile), profile.apiKey, profile.apiSecret);
+  // A demo room does not exist until its first dispatch or participant.
+  const existing = await withProviderDeadline(dispatches.listDispatch(roomName), 12_000).catch((error) => {
+    if ((error as { status?: unknown }).status === 404) return [];
+    throw error;
+  });
+  if (existing.some((dispatch) => dispatch.agentName === profile.agentName)) return;
+  await withProviderDeadline(dispatches.createDispatch(roomName, profile.agentName,
+    profile.deployment ? { deployment: profile.deployment } : undefined), 12_000);
+}
+
 /** Named dispatch is only used in explicitly configured profile mode. The
- * legacy singleton keeps its existing unnamed automatic-dispatch behavior. */
+ * legacy singleton keeps its existing unnamed automatic-dispatch behavior
+ * unless it shares a named profile's project (see dispatchDemoWorker). */
 export async function assignNamedWorker(profile: LiveKitProfile, roomName: string, timeoutMs: number) {
   if (!profile.agentName) throw new Error("Named LiveKit worker is not configured.");
   const host = liveKitApiUrl(profile);

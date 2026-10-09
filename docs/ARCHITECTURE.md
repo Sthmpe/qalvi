@@ -681,6 +681,19 @@ researcher management surface is deferred rather than expanded in this UI stage.
 Stage 2B.4B remains OPEN for human/device voice, voice replacement and backup
 replacement acceptance. Controlled browser UI checks are not LiveKit acceptance.
 
+Demo dispatch (2026-10-09): the public demo joins the legacy singleton project.
+When that project is also a configured named profile, `/api/livekit-token` asks for
+that profile's named worker in the `qalvi-demo-*` room (`dispatchDemoWorker`,
+bounded, once per room) because automatic dispatch has no unnamed worker to reach.
+Without a matching named profile the legacy automatic dispatch is unchanged. The
+demo stays separate from real interviews: no conversation, writer or evidence.
+
+Outbox drain note: the inline drain after an ending leases the five oldest due
+rows. Without a running scheduler, rows from worker-recorded endings accumulate,
+and an ending's own row can fall outside that batch; its room is then ejected by
+the worker heartbeat and the row waits for the scheduler. A deployed scheduler
+calling `/api/internal/lifecycle-outbox` is required in production.
+
 ### Stage 2B.4B live acceptance (2026-10-08, automated, real LiveKit Cloud)
 
 Primary `6UsqFczaqMPv` and backup `8su99bUN5iL3` ran the 2B.4B worker. A headless
@@ -706,6 +719,20 @@ Not covered: a human microphone and real device, a voice-turn replacement (all
 live turns were typed), a replacement inside the backup project, and the browser
 handling of the new states (the current client shows "response delayed" after a
 `resumed` recovery; see the contract above).
+
+Integrated UI live acceptance (2026-10-09, `stage-2b4b-integration`): the real
+participant UI against real LiveKit Cloud passed lifecycle 13/13
+(`9f5b573e-40e6-46a1-8aba-a0e9d73fb762`), researcher cancellation 2/2
+(`0bc3519f-2d4f-4369-ae88-efe6962574bf`), expiry 2/2
+(`93b857c5-d438-470b-af02-2c52f6a4eaef`), damaged history to `failed` 2/2 in six of
+seven runs (for example `cd50a405-b7ed-41d2-9bf5-3d69e5fd9df4`), and a replacement
+inside the backup project (`de90ab9f-c6f2-4980-bb24-2615acfdad35`, generation 1 to
+3, same room, no second greeting, ended and ejected). In the remaining failed-path
+run (`8f93dab6-1b43-40d9-bfb5-18398473d3c7`) worker logs show the fenced worker
+exiting at once, yet the browser made no recovery request. The first backup-routed
+session after scale-to-zero (`8e1c0da3-8f5c-40e7-b8f6-26cd58380ab2`) received a job
+in 17 s but the participant never joined. Both remain open observations. Typed
+turns and service-role crash injection are not human or voice acceptance.
 
 ```
 auth.users 1-1 profiles

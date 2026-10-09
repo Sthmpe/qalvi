@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; its participant lifecycle UI is implemented on `stage-2b4b-ui`, and it remains OPEN pending human/device, voice replacement and final live UI acceptance.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; its participant lifecycle UI is integrated on `stage-2b4b-integration` and passed real-browser live acceptance on 2026-10-09; it remains OPEN pending the human microphone session, a spoken-turn replacement and a deployed outbox scheduler.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -330,11 +330,49 @@ participant ending. Canonical reads and retries preserve evidence/draft identity
 late requests cannot revive terminal interviews. Researcher cancellation UI is
 not attached to the existing sample-only evidence screen; its API is unchanged.
 
-Remaining before closure: a human microphone/device session; a voice-turn
-replacement; a replacement inside the backup project; final live acceptance of
-the participant lifecycle UI; a scheduler for `/api/internal/lifecycle-outbox` in
-deployment. Mid-interview cross-project failover and an aggregate routing deadline
-remain out of scope.
+Remaining before closure: a human microphone/device session; a spoken-turn
+replacement; a scheduler for `/api/internal/lifecycle-outbox` in deployment.
+Mid-interview cross-project failover and an aggregate routing deadline remain out
+of scope.
+
+Integration and final live acceptance (2026-10-09, branch `stage-2b4b-integration`
+from the UI checkpoint `1b8a575`, itself on the backend `f522ea1`). The UI uses the
+backend contract unchanged. One server fix: the public demo had no interviewer,
+because the demo route relied on unnamed automatic dispatch and every deployed
+worker is named; the demo now asks for the named worker of the profile that shares
+its legacy project. Validation: Node 149/149, Python 127/127, TypeScript, lint,
+build, exact-value credential scan of source and browser bundle (13 values, 0 hits).
+
+Real-browser acceptance against the real backend and LiveKit Cloud (headless Chrome,
+typed turns, crash boundaries injected through the service role):
+- demo greets again
+- lifecycle 13/13: greeting without a false delay notice, refresh offers Resume
+  and keeps the same writer, denied microphone notice, replacement after a saved
+  reply (resumed, no re-greeting), replacement with an unconfirmed reply (shown
+  truthfully, never regenerated), explicit typed-draft retry creating exactly one
+  row, End Interview dialog to thanks with room ejection, no polling afterwards
+- cancelled 2/2, expired 2/2, failed 2/2 in 6 of 7 runs
+- backup project: replacement in the backup room (generation 1 to 3), evidence
+  continued without a second greeting, participant end, room ejected
+- internal outbox route: 404 without or with a wrong secret; with the secret it
+  drained a primary and a backup row with each project's credentials; a repeat
+  call drained nothing
+
+Open findings: in one failed-path run the old worker exited normally after being
+fenced, but that browser never requested recovery (not reproduced in six further
+runs). The first backup-routed session after the backup worker scaled to zero was
+assigned a job within 17 s but the browser never joined; a warm repeat passed. The
+inline drain on ending takes the five oldest due rows, so with an undrained backlog
+the ending's own room is ejected by the worker heartbeat instead.
+
+Stage 2B.4B remains OPEN. Still required: a human microphone/device session and a
+spoken-turn replacement (the user must perform them), and a deployed scheduler for
+`/api/internal/lifecycle-outbox`. The Next.js app is not deployed anywhere: the
+Vercel CLI has no credentials and the repository has no project link or other
+hosting configuration, so no scheduler can be configured or verified. Needed: a
+publicly reachable deployment holding `QALVI_INTERNAL_TASK_SECRET`, plus a
+recurring authenticated POST (for example Vercel Cron, or Supabase pg_cron with
+pg_net).
 
 Store:
 - studies

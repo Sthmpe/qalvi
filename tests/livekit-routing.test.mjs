@@ -363,3 +363,32 @@ test("a LiveKit API call that never settles is a bounded provider failure, not a
   assert.equal(result.kind, "retry");
   assert.deepEqual(backend.changes.find((entry) => entry[0] === "rotate").slice(1), ["transport_unavailable", "backup_1"]); // failed over to the next project
 });
+
+test("the demo asks for the named worker that shares its legacy project, once per room", async () => {
+  const calls = [];
+  class Dispatches {
+    constructor(host, key) { this.host = host; this.key = key; }
+    async listDispatch(room) {
+      calls.push(["list", this.host, room]);
+      if (!calls.some((call) => call[0] === "create")) throw { status: 404 }; // the room does not exist yet
+      return [{ agentName: "qalvi-interview" }];
+    }
+    async createDispatch(room, agent, options) { calls.push(["create", this.key, room, agent, options]); return {}; }
+  }
+  const demoRouter = load("../src/lib/interview/livekitRouter.ts", {
+    "server-only": {}, "node:crypto": await import("node:crypto"),
+    "livekit-server-sdk": { RoomServiceClient: class {}, AgentDispatchClient: Dispatches },
+    "./livekitProfiles": profilesModule, "./livekitFailures": failures,
+  });
+  const profiles = profilesModule.loadLiveKitProfiles(config());
+  const room = "qalvi-demo-11111111-1111-4111-8111-111111111111";
+  await demoRouter.dispatchDemoWorker(profiles, "wss://primary.livekit.cloud", room);
+  await demoRouter.dispatchDemoWorker(profiles, "wss://primary.livekit.cloud", room);
+  assert.equal(JSON.stringify(calls.filter((call) => call[0] === "create")),
+    JSON.stringify([["create", "primary-key", room, "qalvi-interview", undefined]]));
+  calls.length = 0;
+  // A legacy project with no named profile keeps automatic dispatch.
+  await demoRouter.dispatchDemoWorker(profiles, "wss://elsewhere.livekit.cloud", room);
+  await demoRouter.dispatchDemoWorker(profilesModule.loadLiveKitProfiles({}), "wss://primary.livekit.cloud", room);
+  assert.equal(calls.length, 0);
+});

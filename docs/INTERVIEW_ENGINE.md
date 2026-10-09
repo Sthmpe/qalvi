@@ -154,7 +154,11 @@ canonical sequence, provisional captions, visuals and tab-scoped typed event IDs
 stay in the same existing session architecture. Ending uses the participant end
 API after confirmation; completed/cancelled/failed/expired interviews are read-only.
 Human microphone and voice-replacement acceptance remain outstanding; this UI
-implementation does not close Stage 2B.4B or begin Stage 2B.5.
+implementation does not close Stage 2B.4B or begin Stage 2B.5. On 2026-10-09 the
+integrated UI passed live checks with typed turns against real LiveKit Cloud: a
+replacement resumed without repeating the greeting, an unconfirmed reply was shown
+truthfully and not regenerated, a backup-project replacement continued the same
+evidence, and ending, cancellation, expiry and damaged history became read-only.
 
 M3 adds on-screen answers as evidence: a participant's tap, slider value, or selection becomes a participant message in the same transcript, marked as given on screen. The `display` field in the structured response above is realised as a `DisplayAction` with four types. In M3 application code decides whether and when a predefined visual appears; the LLM is told what is on screen and asked to respond neutrally, and it does not choose or author visuals.
 
