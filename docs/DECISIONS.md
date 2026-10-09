@@ -706,3 +706,42 @@ baseline.
 Not done: human microphone/device acceptance, a voice-turn replacement, a
 replacement inside the backup project, and the browser UI for the new states
 (Codex; contract in ARCHITECTURE). Stage 2B.4B is OPEN.
+
+## 2026-10-09 — Stage 2B.4B participant lifecycle UI
+
+Use the accepted backend at `f522ea1` on a separate `stage-2b4b-ui` branch.
+No agent, migration, privileged client, API, provider or dispatch changes.
+Room connectivity alone does not mean Qalvi is ready: bounded recovery polls
+the existing endpoint, and waits for an actual agent. A new agent replaces the
+current interviewer, including a brief overlap with the old participant.
+`resumed` and `reply_uncertain` never expect a greeting or manufacture a delayed
+reply. Canonical assistant rows can settle a pending turn when transport captions
+were missed. Typed evidence remains acknowledged through the existing stable ID
+path; nothing is automatically resent.
+
+Participant end is confirmed in an accessible native dialog, single-flight and
+server-authoritative. Distinct terminal/end-reason and expiry states retain loaded
+evidence and stop microphone/submission/recovery loops. Ending or expiry clears
+drafts; temporary failures preserve them. Escape focus restoration was corrected
+after a headless Chrome check; successful ending focuses the terminal notice.
+
+The researcher UI has no real conversation action yet; sample IDs cannot safely
+be sent to researcher cancellation. Defer that surface and keep the existing
+authenticated cancellation API. Stage 2B.4B remains OPEN pending real human/device,
+voice-replacement and backup-project replacement checks. No Stage 2B.5 work.
+
+UI validation: 148 Node tests passed, including database/RLS tests. Headless
+Chrome passed 26 lifecycle checks against the real React components with mocked
+transport/API events, plus 10 production-page smoke assertions for the demo and
+visual gallery. All four widths (320, 390, 768 and 1440px) had no overflow.
+These checks do not establish real Cloud voice or human microphone acceptance.
+
+Final TypeScript and production build passed. Credential scanning covered 183
+source/client files with zero exact-value matches; git diff --check was clean.
+Final full-project lint passed without errors or warnings.
+
+Handoff (2026-10-09): the participant lifecycle UI is accepted as implementation-
+complete and ready for final live acceptance. The checkpoint stays on
+stage-2b4b-ui; Stage 2B.4B remains OPEN and master is not merged. Focused
+interview, recovery and visual regressions passed again: 56/56. No application
+code changed after the full TypeScript, lint and production-build validation.

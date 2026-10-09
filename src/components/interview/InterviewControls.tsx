@@ -17,11 +17,13 @@ interface InterviewControlsProps {
   onDraftChange?: (text: string) => void;
   draftLocked?: boolean;
   onDiscardDraft?: () => void;
+  startLabel?: string;
+  unavailable?: boolean;
 }
 
 export default function InterviewControls({ started, status, mode, connected, micEnabled,
   micBusy, sending, onStart, onToggleMode, onMicTap, onSendText,
-  draft: controlledDraft, onDraftChange, draftLocked = false, onDiscardDraft }: InterviewControlsProps) {
+  draft: controlledDraft, onDraftChange, draftLocked = false, onDiscardDraft, startLabel = "Start Interview", unavailable = false }: InterviewControlsProps) {
   const [localDraft, setLocalDraft] = useState("");
   const draft = controlledDraft ?? localDraft;
   const setDraft = onDraftChange ?? setLocalDraft;
@@ -39,7 +41,7 @@ export default function InterviewControls({ started, status, mode, connected, mi
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!hasText || !connected || sending || submitting.current) return;
+    if (!hasText || !connected || sending || unavailable || submitting.current) return;
     const submitted = draft;
     submitting.current = true;
     try {
@@ -55,7 +57,7 @@ export default function InterviewControls({ started, status, mode, connected, mi
 
   if (!started) return (
     <div className="flex flex-col items-center gap-3">
-      <button type="button" onClick={onStart} className="interview-start rounded-full bg-[var(--accent)] px-8 py-3.5 text-sm font-semibold text-white">Start Interview</button>
+      <button type="button" onClick={onStart} disabled={unavailable} className="interview-start rounded-full bg-[var(--accent)] px-8 py-3.5 text-sm font-semibold text-white">{startLabel}</button>
       <button type="button" onClick={onToggleMode} className="text-xs text-[var(--muted)] hover:underline">{mode === "voice" ? "Type instead" : "Use voice instead"}</button>
       <p className="text-xs text-[var(--muted)]">Takes about 7–12 minutes · voice or text</p>
     </div>
@@ -66,7 +68,7 @@ export default function InterviewControls({ started, status, mode, connected, mi
       <form className={`participant-composer ${listening ? "is-listening" : ""}`} onSubmit={handleSubmit}>
         <textarea ref={textarea} rows={1} aria-label="Your response" aria-describedby="composer-help"
           value={draft} placeholder="Share your thoughts…"
-          readOnly={draftLocked} onChange={(event) => setDraft(event.target.value)}
+          readOnly={draftLocked || unavailable} onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             const mobileReturn = window.matchMedia("(pointer: coarse)").matches && !event.ctrlKey && !event.metaKey;
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !mobileReturn) {
@@ -75,7 +77,7 @@ export default function InterviewControls({ started, status, mode, connected, mi
             }
           }} />
         <button type={hasText ? "submit" : "button"} className={`composer-action ${hasText ? "is-send" : ""}`}
-          disabled={!connected || sending || micBusy}
+          disabled={!connected || sending || micBusy || unavailable}
           aria-label={hasText ? (sending ? "Sending response" : "Send response") : (listening ? "Mute microphone" : "Use microphone")}
           aria-pressed={hasText ? undefined : listening}
           onClick={hasText ? undefined : mode === "text" ? onToggleMode : onMicTap}>

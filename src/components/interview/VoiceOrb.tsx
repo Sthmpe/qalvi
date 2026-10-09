@@ -16,6 +16,13 @@ const STATUS_LABEL: Record<InterviewStatus, string> = {
   listening: "Listening",
   thinking: "Thinking",
   speaking: "Speaking",
+  switching: "Finding a connection",
+  recovering: "Restoring Qalvi",
+  interrupted: "Interview paused",
+  completed: "Interview complete",
+  cancelled: "Interview cancelled",
+  expired: "Session expired",
+  unavailable: "Interview unavailable",
 };
 
 /**

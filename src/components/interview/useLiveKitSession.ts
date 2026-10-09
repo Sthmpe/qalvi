@@ -5,6 +5,7 @@ import { ConnectionErrorReason, ConnectionState, Room, RoomEvent, Track } from "
 import type { ConnectionStatus, InputMode, InterviewStatus, TranscriptMessage } from "./types";
 import { readTranscript, transcriptId, upsertTranscript } from "./transcription";
 import { sessionHealth } from "./sessionHealth";
+import { abortableWait, lifecycleError, pollInterviewerRecovery, recoveryExpectation, type LifecyclePhase } from "./lifecycle";
 import { canonicalTranscript, draftStorageKey, mergeCanonical, readStoredDraft, reconcileStoredDraft, terminalInterview,
   type CanonicalMessage, type RecoverySnapshot, type StoredDraft } from "./recovery";
 import {
@@ -47,6 +48,20 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   const [replyUnconfirmed, setReplyUnconfirmed] = useState(initialRecovery?.replyUnconfirmed ?? false);
   const [controlPending, setControlPending] = useState(initialRecovery?.controlPending ?? false);
   const [legacyHistory, setLegacyHistory] = useState(initialRecovery?.legacyHistory ?? false);
+  const [endReason, setEndReason] = useState(initialRecovery?.endReason ?? null);
+  const [phase, setPhase] = useState<LifecyclePhase>(initialRecovery?.status === "interrupted" ? "interrupted" : null);
+  const [ending, setEnding] = useState(false);
+  const lifecycleRef = useRef(initialRecovery);
+  const blocked = useRef(terminalInterview(initialRecovery?.status ?? ""));
+  const endingRef = useRef(false);
+  const recoveryPoll = useRef<AbortController | null>(null);
+  const requests = useRef(new Set<AbortController>());
+  const stateRequest = useRef<Promise<void> | null>(null);
+  const agentIdentity = useRef<string | null>(null);
+  const transport = useRef<number | null>(null);
+  const recoverRef = useRef<(() => void) | null>(null);
+  const recoveryPaused = useRef(initialRecovery?.status === "interrupted");
+  const recoveryRequested = useRef(false);
   const [draft, setDraftState] = useState("");
   const [draftLocked, setDraftLocked] = useState(false);
   const [status, setStatus] = useState<InterviewStatus>("idle");
@@ -84,10 +99,19 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   const reconcileRef = useRef<(() => void) | null>(null);
   const knownAiSegments = useRef(new Set<string>());
   const completedAiSegments = useRef(new Set<string>());
-  const pendingTurn = useRef<{ since: number; excluded: Set<string> } | null>(null);
+  const pendingTurn = useRef<{ since: number; excluded: Set<string>; afterSequence?: number } | null>(null);
   const expectResponse = useCallback((opening = false, excluded = new Set(knownAiSegments.current)) => {
-    pendingTurn.current = { since: Date.now(), excluded };
+    setPhase(null);
+    pendingTurn.current = { since: Date.now(), excluded, afterSequence: canonicalRef.current.at(-1)?.sequence ?? -1 };
     setTurn(opening ? "opening" : "waiting");
+  }, []);
+
+  const clearTurn = useCallback(() => { pendingTurn.current = null; setTurn(null); }, []);
+  const cancelRequests = useCallback(() => {
+    recoveryPoll.current?.abort();
+    recoveryPoll.current = null;
+    for (const controller of requests.current) controller.abort();
+    requests.current.clear();
   }, []);
 
   const clearDraft = useCallback(() => {
@@ -99,7 +123,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   }, [initialRecovery]);
 
   const setDraft = useCallback((text: string) => {
-    if (draftLocked) return;
+    if (draftLocked || blocked.current || endingRef.current) return;
     setDraftState(text);
     if (!initialRecovery) return;
     if (!text) { clearDraft(); return; }
@@ -128,31 +152,66 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
 
   const fetchRecovery = useCallback(async () => {
     if (!initialRecovery) return;
-    let cursor = canonicalRef.current.at(-1)?.sequence ?? -1;
-    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
-      const response = await fetch(`/interview/api/state?afterSequence=${cursor}`, { cache: "no-store" });
-      if (!response.ok) throw new Error("Saved conversation could not be checked.");
-      const page = await response.json() as RecoverySnapshot;
-      if (page.sessionKey !== initialRecovery.sessionKey) throw new Error("Interview session changed.");
-      setRecoveryStatus(page.status);
-      setReplyUnconfirmed(page.replyUnconfirmed);
-      setControlPending(page.controlPending);
-      setLegacyHistory(page.legacyHistory);
-      const merged = mergeCanonical(canonicalRef.current, page.messages);
-      canonicalRef.current = merged;
-      setMessages(canonicalTranscript(merged));
-      if (page.messages.length) setProvisional(null);
-      const saved = storedDraft.current && merged.some((message) => message.eventKey === `text:${storedDraft.current?.eventId}`);
-      if (saved || terminalInterview(page.status)) clearDraft();
-      if (!page.hasMore || page.nextCursor <= cursor) break;
-      cursor = page.nextCursor;
-    }
-  }, [initialRecovery, clearDraft]);
+    if (stateRequest.current) return stateRequest.current;
+    const controller = new AbortController();
+    requests.current.add(controller);
+    const epoch = generation.current;
+    const run = async () => {
+      let cursor = canonicalRef.current.at(-1)?.sequence ?? -1;
+      for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+        const response = await fetch(`/interview/api/state?afterSequence=${cursor}`, {
+          cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
+        });
+        if (controller.signal.aborted || epoch !== generation.current) return;
+        if (response.status === 401) {
+          if (!terminalInterview(lifecycleRef.current?.status ?? "")) {
+            blocked.current = true; setPhase("expired"); clearDraft(); clearTurn();
+            setAgentReady(false); void roomRef.current?.disconnect();
+          }
+          return;
+        }
+        if (!response.ok) throw new Error("Saved conversation could not be checked.");
+        const page = await response.json() as RecoverySnapshot;
+        if (controller.signal.aborted || epoch !== generation.current) return;
+        if (page.sessionKey !== initialRecovery.sessionKey) throw new Error("Interview session changed.");
+        // A late in-progress read must never revive a confirmed ending.
+        if (terminalInterview(lifecycleRef.current?.status ?? "") && !terminalInterview(page.status)) return;
+        lifecycleRef.current = page;
+        setRecoveryStatus(page.status); setEndReason(page.endReason ?? null);
+        setReplyUnconfirmed(page.replyUnconfirmed); setControlPending(page.controlPending);
+        setLegacyHistory(page.legacyHistory);
+        const merged = mergeCanonical(canonicalRef.current, page.messages);
+        canonicalRef.current = merged;
+        setMessages(canonicalTranscript(merged));
+        if (pendingTurn.current && merged.some(message => message.speaker === "interviewer" &&
+            message.sequence > (pendingTurn.current?.afterSequence ?? Infinity))) clearTurn();
+        if (page.messages.length) setProvisional(null);
+        const saved = storedDraft.current && merged.some((message) => message.eventKey === `text:${storedDraft.current?.eventId}`);
+        if (saved || terminalInterview(page.status)) clearDraft();
+        if (terminalInterview(page.status)) {
+          blocked.current = true; clearTurn(); recoveryPoll.current?.abort();
+          setAgentReady(false); setProvisional(null); void roomRef.current?.disconnect();
+        } else if (page.status === "interrupted" && !agentIdentity.current && !page.recovering && !recoveryRequested.current) {
+          recoveryPaused.current = true;
+          recoveryPoll.current?.abort(); clearTurn(); setPhase("interrupted");
+        }
+        if (!page.hasMore || page.nextCursor <= cursor) break;
+        cursor = page.nextCursor;
+      }
+    };
+    const pending = run().finally(() => {
+      requests.current.delete(controller);
+      if (stateRequest.current === pending) stateRequest.current = null;
+    });
+    stateRequest.current = pending;
+    return pending;
+  }, [initialRecovery, clearDraft, clearTurn]);
 
   const changeConnection = useCallback((next: ConnectionStatus) => {
     connectionRef.current = next;
     setConnection(next);
     if (next !== "connected") {
+      recoveryPoll.current?.abort();
       interruptedSend.current?.();
       setAgentReady(false);
       setStatus(next);
@@ -165,6 +224,10 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   }, []);
   const stop = useCallback(() => {
     generation.current += 1;
+    cancelRequests();
+    stateRequest.current = null;
+    agentIdentity.current = null;
+    recoverRef.current = null;
     changeConnection("disconnected");
     reconnectRef.current = null;
     reconcileRef.current = null;
@@ -188,6 +251,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     micBusyRef.current = false;
     setSending(false);
     setMicBusy(false);
+    endingRef.current = false;
+    setEnding(false);
+    recoveryRequested.current = false;
     setIsActive(false);
     setAgentReady(false);
     setMicEnabled(false);
@@ -195,21 +261,27 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     setDisplayResponse(null);
     setVoiceAvailable(true);
     setStatus("idle");
-  }, [detachAudio, changeConnection]);
+  }, [detachAudio, changeConnection, cancelRequests]);
   useEffect(() => stop, [stop]);
 
   useEffect(() => {
-    if (!realSession || connection !== "connected" || terminalInterview(recoveryStatus)) return;
-    const timer = setInterval(() => { void fetchRecovery().catch(() => {}); }, 4000);
-    return () => clearInterval(timer);
-  }, [realSession, fetchRecovery, connection, recoveryStatus]);
+    if (!realSession || !isActive || blocked.current || phase === "expired" || phase === "unavailable") return;
+    let active = true;
+    let failures = 0;
+    const timer = setInterval(() => { void fetchRecovery().then(() => {
+      if (active) failures = 0;
+    }).catch(() => {
+      if (active && ++failures >= 3) setError("Could not check your saved conversation. Your draft is kept. Try reconnecting.");
+    }); }, 4000);
+    return () => { active = false; clearInterval(timer); };
+  }, [realSession, fetchRecovery, connection, recoveryStatus, isActive, phase]);
 
   useEffect(() => {
-    if (realSession && terminalInterview(recoveryStatus) && roomRef.current) stop();
-  }, [realSession, recoveryStatus, stop]);
+    if (realSession && (terminalInterview(recoveryStatus) || phase === "expired" || phase === "unavailable") && roomRef.current) stop();
+  }, [realSession, recoveryStatus, phase, stop]);
 
   const start = useCallback(async (mode: InputMode) => {
-    if (roomRef.current) return;
+    if (roomRef.current || blocked.current || endingRef.current) return;
     const attempt = ++generation.current;
     setError(null);
     if (!realSession) setMessages([]);
@@ -228,6 +300,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     let hasConnected = false;
     let sessionUnavailable = false;
     let evidenceInterrupted = false;
+    let expectationKey = "";
     const room = new Room();
     roomRef.current = room;
     const current = () => roomRef.current === room && generation.current === attempt;
@@ -243,6 +316,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     const finalSegments = new Set<string>();
     const failConnection = () => {
       if (!current()) return;
+      if (blocked.current) { changeConnection("disconnected"); return; }
       changeConnection("failed");
       setMicEnabled(false);
       detachAudio();
@@ -255,16 +329,36 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
           : "Connection lost. Your conversation and draft are still here. Reconnect to try to resume.");
     };
     const updateAgent = () => {
-      if (!current() || connectionRef.current !== "connected" || sessionHealth(room) !== "connected") return;
-      const agent = [...room.remoteParticipants.values()].find((p) => p.isAgent);
+      if (!current() || blocked.current || connectionRef.current !== "connected" || sessionHealth(room) !== "connected") return;
+      const agents = [...room.remoteParticipants.values()].filter((p) => p.isAgent);
+      const agent = agents.find((p) => p.identity === agentIdentity.current) ?? agents.at(-1);
+      agentIdentity.current = agent?.identity ?? null;
+      if (!agent) {
+        setAgentReady(false); clearTurn();
+        if (realSession) recoverRef.current?.();
+        else setStatus("connecting");
+        return;
+      }
+      const terminalStatus = agent.attributes["qalvi.session.status"];
+      if (realSession && terminalInterview(terminalStatus)) {
+        blocked.current = true;
+        lifecycleRef.current = { ...lifecycleRef.current!, status: terminalStatus };
+        setRecoveryStatus(terminalStatus); setAgentReady(false); clearDraft(); clearTurn();
+        recoveryPoll.current?.abort(); void fetchRecovery().catch(() => {}); void room.disconnect();
+        return;
+      }
       if (agent?.attributes["qalvi.session.status"] === "interrupted") {
         evidenceInterrupted = true;
+        recoveryPaused.current = true;
+        clearTurn(); setPhase("interrupted"); agentIdentity.current = null;
+        void fetchRecovery().catch(() => {});
         failConnection();
         void room.disconnect();
         return;
       }
       if (agent?.attributes["qalvi.session.status"] === "unavailable") {
         sessionUnavailable = true;
+        if (realSession) { blocked.current = true; setPhase("unavailable"); clearTurn(); }
         failConnection();
         void room.disconnect();
         return;
@@ -274,13 +368,68 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       const mapped = mapAgentState(agent?.attributes["lk.agent.state"]);
       setAgentReady(!!agent && !!mapped && mapped !== "connecting");
       setStatus(mapped ?? "connecting");
-      if (!openingExpected && agent && mapped && mapped !== "connecting") {
+      if (realSession && mapped && mapped !== "connecting") {
+        recoveryRequested.current = false;
+        recoveryPoll.current?.abort();
+        const mode = agent.attributes["qalvi.recovery"] ??
+          (lifecycleRef.current?.replyUnconfirmed && lifecycleRef.current?.writerActive ? "reply_uncertain" : undefined);
+        const key = `${agent.identity}:${mode ?? ""}`;
+        if (mode && key !== expectationKey) {
+          expectationKey = key;
+          clearTurn();
+          const expectation = recoveryExpectation(mode);
+          // Recovery attributes describe worker startup, not every later join.
+          // A surviving worker can still say fresh/answering after its reply
+          // was saved; refreshing must not expect that output a second time.
+          const lastAnswer = canonicalRef.current.filter(message => message.speaker === "participant").at(-1);
+          const outputSaved = expectation === "opening"
+            ? canonicalRef.current.some(message => message.speaker === "interviewer")
+            : lastAnswer && canonicalRef.current.some(message => message.speaker === "interviewer" && message.sequence > lastAnswer.sequence);
+          if (expectation && !outputSaved) expectResponse(expectation === "opening");
+          else setPhase(mode === "reply_uncertain" ? "reply_uncertain" : null);
+        } else if (!mode) setPhase(null);
+      } else if (!openingExpected && agent && mapped && mapped !== "connecting") {
         openingExpected = true;
         if (!knownAiSegments.current.size && !pendingTurn.current) expectResponse(true);
       }
     };
+    recoverRef.current = () => {
+      if (!realSession || blocked.current || recoveryPaused.current || !current() || agentIdentity.current || recoveryPoll.current && !recoveryPoll.current.signal.aborted) return;
+      const controller = new AbortController();
+      recoveryPoll.current = controller;
+      void (async () => {
+        try { await fetchRecovery(); } catch {
+          if (!controller.signal.aborted && current()) {
+            setError("Could not check the conversation. Your draft is kept. Retry recovery when your connection returns.");
+            setPhase("interrupted");
+            recoveryPaused.current = true;
+          }
+          return;
+        }
+        if (controller.signal.aborted || !current() || blocked.current || agentIdentity.current) return;
+        setPhase("recovering"); clearTurn();
+        await pollInterviewerRecovery({ signal: controller.signal,
+          ready: () => !current() || blocked.current || !!agentIdentity.current,
+          request: async () => {
+            const response = await fetch("/interview/api/recover", { method: "POST",
+              headers: { "Content-Type": "application/json" }, body: "{}",
+              signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]) });
+            const body = await response.json().catch(() => ({})) as { code?: string };
+            if (!controller.signal.aborted && current() && response.status === 202) recoveryRequested.current = true;
+            if (response.status === 410) await fetchRecovery();
+            return { status: response.status, code: body.code };
+          }, onError: (kind) => {
+            if (!current() || controller.signal.aborted) return;
+            clearTurn(); setAgentReady(false);
+            if (kind === "expired") { blocked.current = true; setPhase("expired"); clearDraft(); void room.disconnect(); }
+            else if (kind === "unavailable" || kind === "ended") {
+              blocked.current = true; setPhase("unavailable"); void room.disconnect();
+            } else { recoveryPaused.current = true; setPhase("interrupted"); setError("Qalvi could not rejoin yet. Your saved conversation and draft are kept. You can retry."); }
+          } });
+      })().finally(() => { if (recoveryPoll.current === controller) recoveryPoll.current = null; });
+    };
     const reconcile = () => {
-      if (!current() || !hasConnected || connectionRef.current === "failed" || connectionRef.current === "connecting") return;
+      if (!current() || blocked.current || !hasConnected || connectionRef.current === "failed" || connectionRef.current === "connecting") return;
       const actual = sessionHealth(room);
       if (actual === "failed") {
         failConnection();
@@ -317,11 +466,14 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     });
     room.on(RoomEvent.ParticipantAttributesChanged, (attributes, participant) => {
       if (!current() || !participant.isAgent
-        || !("lk.agent.state" in attributes || "qalvi.session.status" in attributes || VOICE_ATTRIBUTE in attributes)) return;
+        || !("lk.agent.state" in attributes || "qalvi.session.status" in attributes || "qalvi.recovery" in attributes || VOICE_ATTRIBUTE in attributes)) return;
       timing("agent_state_received", { state: attributes["lk.agent.state"] });
       updateAgent();
     });
-    room.on(RoomEvent.ParticipantConnected, updateAgent);
+    room.on(RoomEvent.ParticipantConnected, (participant) => {
+      if (current() && participant?.isAgent) agentIdentity.current = participant.identity;
+      updateAgent();
+    });
     room.on(RoomEvent.ParticipantDisconnected, updateAgent);
     const recovering = () => {
       if (current()) changeConnection("reconnecting");
@@ -348,7 +500,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       const speaker = participant.identity === room.localParticipant.identity ? "participant" : "ai";
       try {
         await readTranscript(reader, participant.identity, speaker, ++revision, (message) => {
-          if (!current()) return;
+          if (!current() || blocked.current) return;
+          if (speaker === "ai" && (!room.remoteParticipants.get(participant.identity)?.isAgent ||
+              agentIdentity.current && participant.identity !== agentIdentity.current)) return;
           if (realSession) setProvisional(message);
           else setMessages((previous) => upsertTranscript(previous, message));
           if (speaker === "ai" && message.text && !finalSegments.has(message.id)) {
@@ -357,7 +511,8 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
             if (!pendingTurn.current?.excluded.has(message.id)) {
               if (message.isFinal) { pendingTurn.current = null; setTurn(null); }
               else {
-                pendingTurn.current = { since: Date.now(), excluded: pendingTurn.current?.excluded ?? new Set() };
+                pendingTurn.current = { since: Date.now(), excluded: pendingTurn.current?.excluded ?? new Set(),
+                  afterSequence: pendingTurn.current?.afterSequence };
                 setTurn("responding");
               }
             }
@@ -375,7 +530,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     room.registerTextStreamHandler(DISPLAY_TOPIC, async (reader) => {
       let parsed: unknown;
       try { parsed = JSON.parse(await reader.readAll()); } catch { return; }
-      if (!current() || connectionRef.current === "failed" || connectionRef.current === "disconnected") return;
+      if (!current() || blocked.current || connectionRef.current === "failed" || connectionRef.current === "disconnected") return;
       if (parsed === null) {
         // The interviewer took the visual off the screen (skipped, abandoned, or the interview closed).
         if (!current()) return;
@@ -413,10 +568,12 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     let joining = false;
     let connectFailure: { generation: number; eventId: string } | null = null;
     const join = async () => {
-      if (!current() || joining) return;
+      if (!current() || joining || blocked.current || endingRef.current) return;
       joining = true;
       changeConnection("connecting");
       setError(null);
+      setPhase(null); evidenceInterrupted = false; recoveryPaused.current = false;
+      const controller = new AbortController(); requests.current.add(controller);
       let connectionError = "Could not connect. Check your connection and try reconnecting. Your draft is kept here.";
       try {
         let res: Response | null = null;
@@ -431,19 +588,38 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
             body: JSON.stringify(realSession
               ? report ? { failedTransportGeneration: report.generation, failureEventId: report.eventId } : {}
               : { roomName, identity, resume: hasConnected }),
-            signal: AbortSignal.timeout(realSession ? 150_000 : 15_000),
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(realSession ? 150_000 : 15_000)]),
           });
+          if (!current() || controller.signal.aborted) return;
           if (report && (res.ok || res.status === 202)) connectFailure = null;
           if (res.status !== 202) break;
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          await abortableWait(1000, controller.signal);
         } while (current() && Date.now() < preparationDeadline);
         if (res?.status === 503 && realSession) {
           connectionError = "An interview worker is unavailable right now. Your conversation and draft are saved. Try reconnecting.";
         }
-        if (!res || res.status === 202 || !res.ok) throw new Error("Could not reach the interview server.");
-        const { serverUrl, token, transportGeneration } = await res.json() as { serverUrl: string; token: string;
-          transportGeneration?: number };
+        if (!res || res.status === 202 || !res.ok) {
+          const body = await res?.json().catch(() => ({})) as { code?: string } | undefined;
+          const kind = lifecycleError(res?.status ?? 503, body?.code);
+          if (realSession && kind !== "retry") {
+            await fetchRecovery().catch(() => {});
+            if (!current()) return;
+            if (!terminalInterview(lifecycleRef.current?.status ?? "")) {
+              blocked.current = true; setPhase(kind === "expired" ? "expired" : "unavailable");
+              if (kind === "expired") clearDraft();
+            }
+            clearTurn(); changeConnection("disconnected"); return;
+          }
+          throw new Error("Could not reach the interview server.");
+        }
+        const { serverUrl, token, transportGeneration, writer } = await res.json() as { serverUrl: string; token: string;
+          transportGeneration?: number; writer?: string };
         if (!current()) return;
+        recoveryRequested.current = writer === "recovering";
+        if (typeof transportGeneration === "number") {
+          if (transport.current !== null && transportGeneration > transport.current) setPhase("switching");
+          transport.current = transportGeneration;
+        }
         // LiveKit's Room instance owns only the active transport. Reusing it
         // after a failed join keeps transcript/draft and all event handlers.
         if (room.state && room.state !== ConnectionState.Disconnected) await room.disconnect();
@@ -460,10 +636,11 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
         setIsActive(true);
         hasConnected = true;
         changeConnection("connected");
+        setPhase(null);
         if (realSession) void fetchRecovery().catch(() => setError("Could not reload saved conversation. Your draft remains here."));
-        if (!openingExpected && !pendingTurn.current && !knownAiSegments.current.size) expectResponse(true);
+        if (!realSession && !openingExpected && !pendingTurn.current && !knownAiSegments.current.size) expectResponse(true);
         updateAgent();
-        if (desiredMic.current) {
+        if (desiredMic.current && !blocked.current) {
           micBusyRef.current = true;
           setMicBusy(true);
           try {
@@ -480,14 +657,22 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
         changeConnection("failed");
         setError(connectionError);
       } finally {
+        requests.current.delete(controller);
         joining = false;
       }
     };
     reconnectRef.current = join;
     await join();
-  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint, realSession, fetchRecovery]);
+  }, [changeConnection, detachAudio, expectResponse, tokenEndpoint, realSession, fetchRecovery, clearTurn, clearDraft]);
 
   const reconnect = useCallback(async () => {
+    if (blocked.current || endingRef.current) return;
+    if (connectionRef.current === "connected" && !agentIdentity.current) {
+      setPhase("recovering");
+      // An explicit resume is allowed to request the replacement even when
+      // the saved status is interrupted; token issuance performs that check.
+      await reconnectRef.current?.(); return;
+    }
     if (connectionRef.current === "failed" || connectionRef.current === "disconnected") {
       await reconnectRef.current?.();
     }
@@ -495,7 +680,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
 
   const setMicrophone = useCallback(async (enabled: boolean) => {
     const room = roomRef.current;
-    if (!room || connectionRef.current !== "connected" || room.state !== ConnectionState.Connected || micBusyRef.current) return false;
+    if (!room || blocked.current || endingRef.current || !agentReady || connectionRef.current !== "connected" || room.state !== ConnectionState.Connected || micBusyRef.current) return false;
     micBusyRef.current = true;
     setMicBusy(true);
     setError(null);
@@ -511,7 +696,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     } finally {
       if (roomRef.current === room) { micBusyRef.current = false; setMicBusy(false); }
     }
-  }, []);
+  }, [agentReady]);
 
   // Typed messages and on-screen answers share one chat path, so the agent sees one conversation.
   const sendChat = useCallback(async (
@@ -519,7 +704,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   ) => {
     reconcileRef.current?.();
     const room = roomRef.current;
-    if (!wire.trim() || !room || connectionRef.current !== "connected" || room.state !== ConnectionState.Connected || !agentReady || sendingRef.current) return false;
+    if (!wire.trim() || !room || blocked.current || endingRef.current || connectionRef.current !== "connected" || room.state !== ConnectionState.Connected || !agentReady || sendingRef.current) return false;
     sendingRef.current = true;
     const precedingAiSegments = new Set(knownAiSegments.current);
     setSending(true);
@@ -571,7 +756,9 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       }));
       // A fast agent may answer before sendText settles. Do not wait again for
       // a response already received, or mistake an older greeting for that reply.
-      if (![...completedAiSegments.current].some((id) => !precedingAiSegments.has(id))) {
+      const savedTurn = pending && canonicalRef.current.find(message => message.eventKey === `text:${pending.id}`);
+      const savedReply = savedTurn && canonicalRef.current.some(message => message.speaker === "interviewer" && message.sequence > savedTurn.sequence);
+      if (!savedReply && ![...completedAiSegments.current].some((id) => !precedingAiSegments.has(id))) {
         expectResponse(false, precedingAiSegments);
         if ([...knownAiSegments.current].some((id) => !precedingAiSegments.has(id))) setTurn("responding");
       }
@@ -617,14 +804,53 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     catch { setError("Audio playback is blocked. Check your browser's sound permissions."); }
   }, []);
 
-  const participantStatus: InterviewStatus = connection === "connected"
+  const endInterview = useCallback(async () => {
+    if (!realSession || blocked.current || endingRef.current) return false;
+    endingRef.current = true; setEnding(true); setError(null);
+    const controller = new AbortController(); requests.current.add(controller);
+    const epoch = generation.current;
+    try {
+      const response = await fetch("/interview/api/end", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: "{}",
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]) });
+      const result = await response.json() as { status?: string; endReason?: RecoverySnapshot["endReason"] };
+      if (controller.signal.aborted || epoch !== generation.current) return false;
+      if (response.status === 401) {
+        blocked.current = true; setPhase("expired"); clearDraft(); clearTurn();
+        void roomRef.current?.disconnect(); return false;
+      }
+      if (!response.ok || !result.status || !terminalInterview(result.status)) throw new Error("Ending was not confirmed");
+      // Only the canonical server result closes the interview. Cancellation
+      // can win a concurrent participant-end request.
+      lifecycleRef.current = { ...lifecycleRef.current!, status: result.status, endReason: result.endReason };
+      blocked.current = true; setRecoveryStatus(result.status); setEndReason(result.endReason ?? null);
+      clearDraft(); clearTurn(); recoveryPoll.current?.abort(); setAgentReady(false); setMicEnabled(false);
+      void roomRef.current?.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+      void roomRef.current?.disconnect();
+      await fetchRecovery().catch(() => {});
+      return true;
+    } catch {
+      if (!controller.signal.aborted && epoch === generation.current) setError("The interview could not be ended right now. Please try again. Your conversation is kept here.");
+      return false;
+    } finally {
+      requests.current.delete(controller); endingRef.current = false;
+      if (epoch === generation.current) setEnding(false);
+    }
+  }, [realSession, clearDraft, clearTurn, fetchRecovery]);
+
+  const participantStatus: InterviewStatus = terminalInterview(recoveryStatus) ? recoveryStatus === "failed" ? "unavailable" : recoveryStatus as InterviewStatus
+    : phase === "expired" ? "expired" : phase === "unavailable" ? "unavailable"
+    : phase === "switching" ? "switching" : phase === "recovering" ? "recovering"
+    : phase === "interrupted" ? "interrupted" : phase === "reply_uncertain" ? "ready"
+    : connection === "connected"
     ? turn === "delayed" ? "delayed"
       : turn === "responding" ? "speaking"
       : turn && status !== "thinking" ? "waiting"
       : status === "listening" && !micEnabled ? "ready" : status
     : status;
   return { status: participantStatus, connection, turn, messages, provisional, draft, draftLocked, setDraft, discardDraft: clearDraft,
-    recoveryStatus, replyUnconfirmed, controlPending, legacyHistory,
+    recoveryStatus, replyUnconfirmed, controlPending, legacyHistory, phase, endReason, ending, endInterview,
+    readOnly: terminalInterview(recoveryStatus) || phase === "expired" || phase === "unavailable",
     error, isActive, agentReady, micEnabled, micBusy, sending,
     visualReady, voiceAvailable,
     audioBlocked, display, displayResponse, start, stop, reconnect, setMicrophone, sendText, respondToDisplay, enableAudio };

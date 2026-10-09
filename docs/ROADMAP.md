@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; it remains OPEN pending human device acceptance and the browser UI for its states.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; its participant lifecycle UI is implemented on `stage-2b4b-ui`, and it remains OPEN pending human/device, voice replacement and final live UI acceptance.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -323,10 +323,16 @@ ejection, terminal refusal), participant end 3/3, worker-side ejection with an
 undrained outbox 3/3, and post-grace replacement without re-greeting. Validation:
 Node 131/131 (database/RLS 48), Python 127/127, TypeScript, lint, build.
 
+Participant lifecycle UI is implemented on `stage-2b4b-ui`: bounded replacement
+recovery, truthful `qalvi.recovery` expectations, interruption/resume, transport
+switching, uncertain replies, terminal/expired read-only states, and confirmed
+participant ending. Canonical reads and retries preserve evidence/draft identity;
+late requests cannot revive terminal interviews. Researcher cancellation UI is
+not attached to the existing sample-only evidence screen; its API is unchanged.
+
 Remaining before closure: a human microphone/device session; a voice-turn
-replacement; a replacement inside the backup project; Codex implementing the
-lifecycle contract (the current client shows "response delayed" after a
-`resumed` recovery); a scheduler for `/api/internal/lifecycle-outbox` in
+replacement; a replacement inside the backup project; final live acceptance of
+the participant lifecycle UI; a scheduler for `/api/internal/lifecycle-outbox` in
 deployment. Mid-interview cross-project failover and an aggregate routing deadline
 remain out of scope.
 

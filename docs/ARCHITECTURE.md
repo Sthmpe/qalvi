@@ -644,6 +644,43 @@ Opening expectation: a client must expect an unprompted interviewer message only
 for `qalvi.recovery = fresh` (greeting) or `answering` (reply to a recovered turn).
 For `resumed` and `reply_uncertain` nothing is said until the participant speaks.
 
+#### Participant lifecycle UI (2026-10-09; final live acceptance pending)
+
+`useLiveKitSession` consumes the lifecycle contract without changing the server,
+worker, schema or dispatch model. Connected room state is distinct from interviewer
+readiness. A replacement agent becomes current on joining; captions from the old
+interviewer are ignored. `fresh` and `answering` create an expected turn; `resumed`
+and `reply_uncertain` clear that expectation. A newly fetched canonical assistant
+row also clears waiting if its live caption was lost.
+Static worker startup attributes cannot re-expect a greeting or recovered reply
+that is already present in canonical history after a same-worker refresh.
+
+An absent interviewer triggers a canonical state check and cookie-scoped recovery.
+Recovery `202` polls every two seconds; `200 active` still waits for an agent to
+join. One polling run has a 180-second budget; each recovery HTTP request has
+a 20-second timeout. A final canonical-state read is separate. There are at most
+five consecutive temporary failures, with bounded backoff.
+Exhaustion offers explicit retry rather than another automatic polling loop.
+Interrupted interviews offer Resume. Unmount, agent arrival, network recovery,
+terminal status and obsolete room attempts abort recovery. Canonical reads are
+single-flight and guarded against stale room epochs and terminal-state reversal.
+
+Participant End Interview uses an accessible native confirmation dialog and sends
+only `{}` to the existing end endpoint. It is single-flight, never optimistic,
+and respects a concurrent researcher cancellation. Terminal status/end reason and
+session expiry have distinct copy; microphone and sending stop, saved transcript
+remains, and definitive endings/expiry clear the tab draft. Recoverable errors
+keep the stable draft event ID and require explicit retry. No browser database
+mutations or participant-selected transport/ownership IDs were added.
+
+The researcher evidence browser still contains sample records, with no real
+conversation-management action. A cancellation button was therefore not attached
+to mock IDs; the authenticated cancellation endpoint is unchanged. A real
+researcher management surface is deferred rather than expanded in this UI stage.
+
+Stage 2B.4B remains OPEN for human/device voice, voice replacement and backup
+replacement acceptance. Controlled browser UI checks are not LiveKit acceptance.
+
 ### Stage 2B.4B live acceptance (2026-10-08, automated, real LiveKit Cloud)
 
 Primary `6UsqFczaqMPv` and backup `8su99bUN5iL3` ran the 2B.4B worker. A headless
