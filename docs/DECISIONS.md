@@ -788,3 +788,11 @@ adds a dependency): enable LiveKit Cloud enhanced noise cancellation on the agen
 audio input, and/or hold participant audio while Qalvi is speaking unless the
 participant clearly interrupts. A repeat session should use headphones first to
 separate device echo from a pipeline defect. Stage 2B.4B remains OPEN.
+
+Participant confirmation (2026-10-10): the session ran in the VS Code built-in
+browser on laptop speakers; the participant spoke during the silent gap and did
+not refresh. An editor webview is not a supported participant browser, so the
+missed speech and the echo are not yet attributed to Qalvi. The repeat runs in
+desktop Chrome or Edge, first with headphones, then once on speakers to test the
+browser's echo cancellation; the echo fix is adopted only if Chrome on speakers
+still saves Qalvi's speech as participant evidence.
