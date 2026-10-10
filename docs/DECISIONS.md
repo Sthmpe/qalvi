@@ -771,3 +771,20 @@ five rows first, so an ending's own row can wait behind a backlog (the worker
 heartbeat still ejects its room). Harness assertions corrected during the run: the
 mid-session microphone failure uses its own wording, ejection is awaited rather
 than sampled, and LiveKit does not list a finished dispatch.
+
+## 2026-10-10 — Stage 2B.4B first human microphone session
+
+The first human session (`c6a9f3e9-24a4-4789-8265-548caa12877b`) does not pass
+human-device acceptance. Voice capture, transcription, control-before-reply
+ordering, spoken replies and the ending all worked, but the participant's microphone
+captured Qalvi's playback and five echoes of Qalvi's speech were saved as
+participant messages and classified. Raw evidence attributed to the wrong speaker
+is an evidence-integrity failure, so this is a blocker, not a tuning note. No
+refresh happened and the crash injector's window had expired, so neither refresh
+nor spoken-turn replacement was tested.
+
+Proposed, not implemented (needs approval because it changes the voice pipeline or
+adds a dependency): enable LiveKit Cloud enhanced noise cancellation on the agent's
+audio input, and/or hold participant audio while Qalvi is speaking unless the
+participant clearly interrupts. A repeat session should use headphones first to
+separate device echo from a pipeline defect. Stage 2B.4B remains OPEN.

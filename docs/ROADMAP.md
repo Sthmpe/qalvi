@@ -374,6 +374,27 @@ publicly reachable deployment holding `QALVI_INTERNAL_TASK_SECRET`, plus a
 recurring authenticated POST (for example Vercel Cron, or Supabase pg_cron with
 pg_net).
 
+First human microphone session (2026-10-10, conversation
+`c6a9f3e9-24a4-4789-8265-548caa12877b`, primary project, local server on
+`stage-2b4b-integration`). Confirmed by database and worker logs: real voice turns
+were transcribed and saved (`voice:` keys); every control was saved before its reply
+began (`db_ack`, then `control_db_ack`, then `llm_chat_begin`); spoken replies were
+generated and saved; one greeting, contiguous sequence, no duplicate keys; End
+Interview recorded `completed`, `participant_ended` and `ended_at`, the outbox
+ejected the room 2 s later and the room is gone.
+
+Not achieved: no refresh occurred (the worker logged no reconnect grace before the
+end), and the spoken-turn crash injector had already timed out, so no replacement
+ran (writer generation stayed 1). Defect found: Qalvi's own speech was transcribed
+back as participant evidence (sequences 13, 16, 18, 20 and 21 repeat the preceding
+Qalvi line within seconds), and those echoes were classified, including as stop
+requests. The browser publishes the microphone with the default echo cancellation;
+the agent applies no input noise/echo filtering. Also unexplained: about 7.5 minutes
+after the greeting passed with no transcribed speech although the first saved turn
+says "I said I can hear you". The last turn (sequence 21) arrived 1 s before the
+ending and has no control; the ending made the worker stop rather than classify it.
+Human-device and spoken-turn replacement acceptance remain open.
+
 Store:
 - studies
 - objectives
