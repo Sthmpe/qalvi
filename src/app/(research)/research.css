@@ -1444,7 +1444,7 @@
   text-align: left;
 }
 .invitation-consent input { width: 20px; height: 20px; flex: none; margin-top: 1px; accent-color: #4f46e5; }
-.live-invitation-panel { margin-top: 48px; padding: 28px; border: 1px solid #e6e6eb; border-radius: 18px; background: #fff; }
+.live-invitation-panel { margin: 28px 0 8px; padding: 28px; border: 1px solid #e6e6eb; border-radius: 18px; background: #fff; }
 .live-invitation-panel h2 { margin: 8px 0; font-size: 22px; }
 .live-invitation-panel p { color: #4b4f58; }
 .live-invitation-form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 20px; }

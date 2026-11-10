@@ -91,3 +91,12 @@ test("saved objectives are read defensively and written as plain columns", () =>
   assert.deepEqual(plain(columns.objectives), [{ id: "switch_moment", topic: "The last time they switched", priority: "high" }]);
   assert.deepEqual(plain(readinessGaps({ researchGoal: "", audience: "x", objectives: [] })), ["a research goal", "at least one objective"]);
 });
+
+test("participant links come only from the existing invitation gateway, for active studies", () => {
+  const panel = readFileSync(new URL("../src/components/research/StudyInvitationPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /fetch\(`\/api\/studies\/\$\{studyId\}\/invitations`, \{ method: "POST" \}\)/);
+  const gateway = readFileSync(new URL("../src/lib/interview/gateway.ts", import.meta.url), "utf8");
+  assert.match(gateway, /study\.status !== "active"/, "issuance still refuses non-active studies");
+  const overview = readFileSync(new URL("../src/app/(research)/studies/[studyId]/page.tsx", import.meta.url), "utf8");
+  assert.match(overview, /active=\{study\.status === "active"\}/);
+});
