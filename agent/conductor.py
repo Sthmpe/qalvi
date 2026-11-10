@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from clock import InterviewClock
 from signals import Signals, Topic
-from visuals import RESPONSE_PREFIX, VISUAL_ACTION, VISUAL_NAME, VISUAL_VALUE, Step
+from visuals import RESPONSE_PREFIX, VISUAL_ACTION, VISUAL_ACTION_IN_WORDS, VISUAL_NAME, VISUAL_VALUE, Step
 
 STALL_TURNS = 3   # on-topic turns on one objective without progress before moving on
 
@@ -160,6 +160,8 @@ class Conductor:
     steps: list[Step]
     clock: InterviewClock
     goal: str = "how the participant currently handles a problem they care about"
+    methodology: str = "real-default-v1"   # recorded with every durable control decision
+    answer_in_words: bool = False          # real rooms: visuals are reference, answers are spoken or typed
     remaining: list[Step] = field(init=False)
     learned: list[str] = field(default_factory=list)   # topic keys answered well enough to retire
     partly: list[str] = field(default_factory=list)    # topic keys touched in words, still open
@@ -195,6 +197,8 @@ class Conductor:
         """Plain names of visuals still usable here, so Qalvi can answer about them truthfully."""
         names: list[str] = []
         for step in self._usable_steps():
+            if step.display is None:
+                continue
             name = VISUAL_NAME.get(step.display["type"])
             if name and name not in names:
                 names.append(name)
@@ -214,7 +218,7 @@ class Conductor:
             "kind": VISUAL_NAME.get(kind, "something"),
             "prompt": self.on_screen.display["prompt"],
             "value": VISUAL_VALUE.get(kind, "help them answer"),
-            "action": VISUAL_ACTION.get(kind, "answer in words."),
+            "action": (VISUAL_ACTION_IN_WORDS if self.answer_in_words else VISUAL_ACTION).get(kind, "answer in words."),
             "answered": self.answered,
         }
 
@@ -251,7 +255,7 @@ class Conductor:
         current = objective.topic if objective else "wrapping up what has been learned"
         touched = f"Touched but not settled: {', '.join(self.partly)}. " if self.partly else ""
         return (
-            f"Research goal: {self.goal}. Current objective: {current}. "
+            f"Research goal: {self.goal.rstrip('. ')}. Current objective: {current}. "
             f"Learned so far: {learned}. {touched}Still unresolved: {unresolved}. "
             f"Stage: {self.stage(phase)}."
         )
@@ -386,7 +390,7 @@ class Conductor:
                 if answered is not None:
                     notes.append(TOOLS_ANSWERED.format(**answered))
                 # Explicit interest outranks a hold or an earlier set-aside: they are asking.
-                step = self._next_step() if self._visual_allowed(phase) else None
+                step = self._next_visual_step() if self._visual_allowed(phase) else None
                 if step is not None:
                     self._show(decision, step)
                     decision.action = "show a relevant visual"
@@ -401,7 +405,7 @@ class Conductor:
                 self.hold -= 1
             elif self._visual_allowed(phase):
                 step = self._next_step()
-                if step is not None and step.key not in self.verbal_only:
+                if step is not None and step.display is not None and step.key not in self.verbal_only:
                     self._show(decision, step)
                     decision.action = "show a relevant visual"
                     notes += [step.guidance, *self._partial_note(step)]
@@ -477,7 +481,7 @@ class Conductor:
 
     def _partial_note(self, step: Step) -> list[str]:
         """A visual is still worth showing on a topic they only touched in words."""
-        value = VISUAL_VALUE.get(step.display["type"])
+        value = VISUAL_VALUE.get(step.display["type"]) if step.display else None
         if step.key not in self.partly or not value:
             return []
         return [PARTIAL_VISUAL.format(value=value)]
@@ -515,6 +519,10 @@ class Conductor:
 
     def _next_step(self) -> Step | None:
         return next(iter(self._usable_steps()), None)
+
+    def _next_visual_step(self) -> Step | None:
+        """The next usable objective that has a visual, for a participant asking to see one."""
+        return next((step for step in self._usable_steps() if step.display is not None), None)
 
     def _visual_allowed(self, phase: str) -> bool:
         if self.visuals_off or phase in ("closing", "over") or self.closed:

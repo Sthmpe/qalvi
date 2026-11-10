@@ -38,6 +38,15 @@ VISUAL_ACTION = {
     "slider": "move the slider to the value they mean, then confirm it.",
     "multiple_choice": "pick every choice that applies, one or several, then confirm.",
 }
+# In a real study room the screen is reference material: an on-screen answer must be
+# saved as atomic visual evidence, which is not wired yet, so the participant answers
+# in words and that answer is ordinary canonical evidence.
+VISUAL_ACTION_IN_WORDS = {
+    **VISUAL_ACTION,
+    "comparison_cards": "read the cards and say or type which one fits best. Nothing on it can be tapped here.",
+    "slider": "read the range and say or type roughly where they are on it. Nothing on it can be moved here.",
+    "multiple_choice": "read the choices and say or type which apply. Nothing on it can be tapped here.",
+}
 
 DEMO_GOAL = (
     "how the participant currently manages competing priorities in a working week, "
@@ -51,8 +60,8 @@ class Step:
     topic: str        # one-line description of what we want to learn
     purpose: str      # why we ask, in case the participant questions it
     priority: str     # "high" steps survive shortening; "low" steps are dropped first
-    display: dict
-    guidance: str     # how to introduce the visual, for the reply model
+    display: dict | None  # a predefined visual, or None for a conversation-only objective
+    guidance: str     # how to introduce the visual, for the reply model ("" without one)
 
 
 DEMO_STEPS: list[Step] = [

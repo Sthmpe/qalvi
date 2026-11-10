@@ -728,3 +728,60 @@ Security Advisor previously reported one expected Stage 2A warning:
 `authenticated`, which is required to create a researcher's first workspace;
 `anon` cannot execute it, and the function checks `auth.uid()` before inserting.
 The CLI schema dump requires Docker, which is not installed here. Live Stage 2A acceptance passed with one real researcher account. First sign-in created one workspace and owner membership; refresh, protected navigation, sign-out, and repeat sign-in preserved the same workspace. Linked authenticated-role checks matched the intended read and write boundaries, while the two-tenant PGlite tests cover foreign-workspace isolation. No live interview evidence is persisted yet.
+
+## M5 generic study system
+
+A study is created and edited by a signed-in researcher through their own RLS
+session (`src/lib/studies/actions.ts`, `queries.ts`). `src/lib/studies/setup.ts`
+is the one validator shared by the editor and the server action; the database
+repeats the bounds as checks.
+
+| Route | Behavior |
+| --- | --- |
+| `/studies` | Real workspace studies, search and status filter |
+| `/studies/new` | Create a study (draft or active) |
+| `/studies/[studyId]` | Goal, audience, objectives, assumptions, real counts |
+| `/studies/[studyId]/settings` | "Setup" tab: edit the saved study |
+| `/studies/[studyId]/interviews`, `participants`, `findings` | Real counts and honest empty states until Milestone 6 |
+
+The sample fixtures, sample evidence browser and the `/interview/[studyId]`
+sample invitation were removed. Starting-point templates remain in
+`src/lib/research/templates.ts`.
+
+Migration `20261110000100_study_setup.sql` adds `studies.objectives` (ordered
+JSONB: `id`, `topic`, `priority` high|low, optional `visual`) and
+`studies.assumptions` (text array, at most ten), column grants, and an
+activation rule: an active study needs a goal, an audience and at least one
+objective. A visual is researcher-authored data for one of the existing four
+types, with id `study-<objectiveId>`; it is validated by the room's own
+`parseDisplayAction`. Policies are unchanged.
+
+### Study plan to agent
+
+Migration `20261110000200_study_interview_plan.sql` adds
+`read_interview_study_plan(conversation, writer_generation)`, service-role only.
+The path is the existing trusted one: invitation, consent claim, conversation,
+fenced writer claim, then the agent reads the plan of the conversation it owns.
+The browser and LiveKit metadata never carry the plan. A stale generation, a
+non-active study, or `anon`/`authenticated` callers are refused.
+
+`agent/study.py` re-validates the plan and every visual (an invalid visual is
+dropped and its objective stays conversation-only) and builds conductor steps.
+A study step may have no visual; the conductor only shows a visual when the
+current objective has one. The interviewer's instructions carry the goal,
+audience, objective order and assumptions; assumptions guide listening and are
+never voiced. A real interview without a readable, usable plan does not start:
+the room is marked unavailable and the writer interrupted. Demo rooms keep the
+demo plan and byte-identical demo instructions.
+
+Control records made under a study use methodology `study-plan-v1`; the
+database accepts it alongside `real-default-v1`, and the default replay refuses
+it (study replay belongs to deferred Stage 2B.4B).
+
+Visuals in real rooms: before a study visual is sent, the agent records it with
+the existing `issue_interview_visual` (writer-fenced, immutable), so what the
+participant saw is durable evidence. The room renders it as reference material
+and the participant answers by speaking or typing; that answer is an ordinary
+canonical voice/text message with its control record. Structured tap answers
+(`acknowledge_interview_visual`, `append_interview_visual_response`) need a
+control-protocol change for the `visual` channel and remain later work.

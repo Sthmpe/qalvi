@@ -1224,9 +1224,9 @@
   min-width: 0;
 }
 .visual-fields legend {
-  float: left;
-  width: 100%;
-  margin-bottom: 4px;
+  display: block;
+  padding: 0;
+  margin-bottom: 2px;
   color: var(--q-indigo);
   font-size: 12px;
   font-weight: 550;

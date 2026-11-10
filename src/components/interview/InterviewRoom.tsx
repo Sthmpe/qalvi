@@ -47,6 +47,7 @@ export default function InterviewRoom({ tokenEndpoint, initialRecovery, readOnly
               response={liveKit.displayResponse}
               busy={liveKit.sending || !connected || !liveKit.visualReady}
               onRespond={(response) => void liveKit.respondToDisplay(response)}
+              inWords={liveKit.answersInWords}
             />
           )}
           <section className="conversation-transcript" aria-label="Conversation transcript">
@@ -63,7 +64,7 @@ export default function InterviewRoom({ tokenEndpoint, initialRecovery, readOnly
           {liveKit.connection === "reconnecting" && <p role="status" className="interview-notice">Reconnecting. Your conversation and draft are kept here.</p>}
           {liveKit.connection === "connected" && !liveKit.voiceAvailable && <p role="status" className="interview-notice">Qalvi&apos;s voice is unavailable for now. Replies appear here as text, and you can keep speaking or typing.</p>}
           {!terminal && liveKit.connection === "failed" && <button type="button" className="interview-reconnect" onClick={() => void liveKit.reconnect()}>Reconnect interview</button>}
-          {liveKit.display && !liveKit.visualReady && <p className="interview-notice">This visual is kept for reference. You can answer in words or wait for Qalvi to share a new visual.</p>}
+          {liveKit.display && !liveKit.visualReady && !liveKit.answersInWords && <p className="interview-notice">This visual is kept for reference. You can answer in words or wait for Qalvi to share a new visual.</p>}
           {liveKit.error && (
             <div role="alert" className="interview-notice">
               <p>{liveKit.error}</p>

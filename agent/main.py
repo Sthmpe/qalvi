@@ -41,6 +41,7 @@ from recovery import control_data
 from reconnect import ReconnectGrace, REFRESH_GRACE_SECONDS
 from signals import Exchange, classify
 from speech import SpeechFilter
+from study import METHODOLOGY as STUDY_METHODOLOGY, StudyPlan, StudyPlanError, build_plan, study_context
 from visuals import DEMO_GOAL, DISPLAY_TOPIC, demo_steps_for_room
 
 load_dotenv()
@@ -50,11 +51,19 @@ DEMO_BUDGET = TimeBudget(max_duration=10 * 60)
 USER_AWAY_TIMEOUT = 15.0  # framework default, made explicit because idle time is measured from it
 VOICE_ATTRIBUTE = "qalvi.voice"  # the browser reads this to explain a silent interviewer
 
-INSTRUCTIONS = (
-    "You are Qalvi, a calm, attentive, and neutral research interviewer. This session is "
+PERSONA = "You are Qalvi, a calm, attentive, and neutral research interviewer. "
+DEMO_OPENING = (
+    "This session is "
     "a short demo conversation, not a full study. Greet the participant in one short "
     "sentence, then ask a single open question about how they currently handle a problem "
-    "they care about. Keep every reply to one or two short sentences. Never sell, defend, "
+    "they care about. "
+)
+STUDY_OPENING = (
+    "Greet the participant in one short sentence, then ask a single open question that "
+    "begins the first objective, grounded in their own recent experience. "
+)
+CONDUCT = (
+    "Keep every reply to one or two short sentences. Never sell, defend, "
     "or pitch anything. "
     "You have research goals, but the person in front of you comes first. If they raise a "
     "concern, question why you are asking, or seem confused, respond to that before "
@@ -84,6 +93,12 @@ INSTRUCTIONS = (
     "Each turn you receive a short note with the action to take, the research goal, the "
     "current objective, what is learned, and what is unresolved; follow it for that reply only."
 )
+INSTRUCTIONS = PERSONA + DEMO_OPENING + CONDUCT
+
+
+def study_instructions(plan: StudyPlan) -> str:
+    """A real study's interviewer: the same conduct, anchored to the researcher's own study."""
+    return PERSONA + STUDY_OPENING + CONDUCT + " " + study_context(plan)
 
 
 class EvidenceTracedLLM(groq.LLM):
@@ -103,8 +118,9 @@ class EvidenceTracedLLM(groq.LLM):
 class Interviewer(Agent):
     def __init__(self, room: rtc.Room, conductor: Conductor, classifier,
                  writer: EvidenceWriter | None = None,
-                 traced_llm: EvidenceTracedLLM | None = None) -> None:
-        super().__init__(instructions=INSTRUCTIONS)
+                 traced_llm: EvidenceTracedLLM | None = None,
+                 instructions: str = INSTRUCTIONS) -> None:
+        super().__init__(instructions=instructions)
         self._room = room
         self._conductor = conductor
         self._classifier = classifier
@@ -169,6 +185,9 @@ class Interviewer(Agent):
         if decision.clear:
             await self._room.local_participant.send_text("null", topic=DISPLAY_TOPIC)
         if decision.display is not None:
+            if self._writer:
+                # What the participant sees is evidence too: record it before it is shown.
+                await self._writer.issue_visual(decision.display)
             await self._room.local_participant.send_text(json.dumps(decision.display), topic=DISPLAY_TOPIC)
         on_screen = conductor.visual_state()
         logger.info("[qalvi turn] %s", json.dumps({
@@ -250,18 +269,28 @@ async def entrypoint(ctx: JobContext):
     evidence_api: SupabaseEvidenceAPI | None = None
     writer: EvidenceWriter | None = None
     real_participant = None
+    plan: StudyPlan | None = None
     if real:
         try:
             evidence_api = SupabaseEvidenceAPI.from_env()
             real_participant = await ctx.wait_for_participant()
             writer = await EvidenceWriter.claim(evidence_api, ctx.room.name, real_participant.identity)
-        except EvidenceError:
-            logger.error("Real interview could not acquire its evidence writer")
+            # A real interview follows its own saved study, or does not start at all.
+            plan = build_plan(await writer.read_study_plan())
+        except (EvidenceError, StudyPlanError) as exc:
+            logger.error("Real interview could not start: %s",
+                         "study plan unavailable" if isinstance(exc, StudyPlanError) or writer else
+                         "evidence writer unavailable")
             if ctx.room.isconnected():
                 await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
+            if writer:
+                await writer.interrupt()
             if evidence_api:
                 await evidence_api.close()
             return
+        logger.info("[qalvi study] study=%s setup=%s objectives=%d visuals=%d assumptions=%d",
+                    plan.study_id, plan.fingerprint, len(plan.steps),
+                    sum(1 for step in plan.steps if step.display), len(plan.assumptions))
     stt = groq.STT(model="whisper-large-v3-turbo")
     llm_model = (EvidenceTracedLLM if real else groq.LLM)(model="openai/gpt-oss-120b")
     classifier = groq.LLM(model="openai/gpt-oss-120b", reasoning_effort="low", max_completion_tokens=300)
@@ -272,11 +301,18 @@ async def entrypoint(ctx: JobContext):
                               if real else {}))
     install_latency_logging(session, room_name=ctx.room.name, stt=stt, llm=llm_model, tts=tts)
 
-    steps = demo_steps_for_room(ctx.room.name)
-    clock = InterviewClock(DEMO_BUDGET if steps else None)
-    conductor = Conductor(steps, clock, goal=DEMO_GOAL) if steps else Conductor(steps, clock)
+    if plan:
+        # No per-study time budget yet (ROADMAP exclusion); the plan alone shapes the interview.
+        clock = InterviewClock(None)
+        conductor = Conductor(list(plan.steps), clock, goal=plan.goal,
+                              methodology=STUDY_METHODOLOGY, answer_in_words=True)
+    else:
+        steps = demo_steps_for_room(ctx.room.name)
+        clock = InterviewClock(DEMO_BUDGET if steps else None)
+        conductor = Conductor(steps, clock, goal=DEMO_GOAL) if steps else Conductor(steps, clock)
     agent = Interviewer(ctx.room, conductor, classifier, writer,
-                        llm_model if isinstance(llm_model, EvidenceTracedLLM) else None)
+                        llm_model if isinstance(llm_model, EvidenceTracedLLM) else None,
+                        instructions=study_instructions(plan) if plan else INSTRUCTIONS)
     opening = OpeningTurn()
     presence = {"nudges": 0, "task": None}
     assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = asyncio.Queue() if writer else None

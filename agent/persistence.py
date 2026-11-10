@@ -13,6 +13,7 @@ import aiohttp
 
 REAL_ROOM = re.compile(r"^qalvi-real-[0-9a-f-]{36}$")
 EVENT_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
+CONTROL_METHODOLOGIES = ("real-default-v1", "study-plan-v1")
 
 
 class EvidenceError(Exception):
@@ -147,7 +148,7 @@ class EvidenceWriter:
             raise EvidenceError("Evidence acknowledgement unavailable")
 
     async def record_control(self, message_id: str, control: dict) -> None:
-        if control.get("schema_version") != 1 or control.get("methodology_version") != "real-default-v1":
+        if control.get("schema_version") != 1 or control.get("methodology_version") not in CONTROL_METHODOLOGIES:
             raise EvidenceError("Unsupported recovery control protocol")
         payload = {
             "p_conversation_id": self.conversation_id,
@@ -163,6 +164,31 @@ class EvidenceWriter:
                 result = await self.api.rpc("record_interview_turn_control", payload)
                 if result != message_id:
                     raise EvidenceError("Control acknowledgement malformed")
+                return
+            except EvidenceError as exc:
+                if attempt == 2 or not exc.retryable:
+                    raise
+                await asyncio.sleep(0.2 * (attempt + 1))
+
+    async def read_study_plan(self) -> dict:
+        """The saved study for this claimed conversation. Fenced by writer generation."""
+        plan = await self.api.rpc("read_interview_study_plan", {
+            "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+        })
+        if not isinstance(plan, dict):
+            raise EvidenceError("Study plan could not be read")
+        return plan
+
+    async def issue_visual(self, display: dict) -> None:
+        """Record exactly what is about to be shown, before it is shown. Idempotent per action id."""
+        for attempt in range(3):
+            try:
+                result = await self.api.rpc("issue_interview_visual", {
+                    "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+                    "p_definition": display,
+                })
+                if not isinstance(result, str):
+                    raise EvidenceError("Visual issue acknowledgement malformed")
                 return
             except EvidenceError as exc:
                 if attempt == 2 or not exc.retryable:

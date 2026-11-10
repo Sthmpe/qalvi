@@ -531,7 +531,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     });
     try {
       if (realSession && shown.source === "visual") {
-        setError("On-screen answers are not available in this live study yet.");
+        setError("Answer this one by speaking or typing. Qalvi will follow up.");
         return false;
       }
       const pending = realSession ? pendingEvidence.current?.wire === wire ? pendingEvidence.current
@@ -627,5 +627,8 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     recoveryStatus, replyUnconfirmed, controlPending, legacyHistory,
     error, isActive, agentReady, micEnabled, micBusy, sending,
     visualReady, voiceAvailable,
+    // Real study rooms show visuals as reference: structured on-screen answers need the
+    // atomic visual-response evidence path, so participants answer by speaking or typing.
+    answersInWords: realSession,
     audioBlocked, display, displayResponse, start, stop, reconnect, setMicrophone, sendText, respondToDisplay, enableAudio };
 }

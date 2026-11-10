@@ -361,7 +361,7 @@ describe("live interview persistence foundation", () => {
       "read_participant_interview_recovery", "claim_interview_invitation_with_profile",
       "reserve_interview_transport", "confirm_interview_transport",
       "rotate_interview_transport", "fail_interview_transport",
-      "report_interview_transport_connection_failure"];
+      "report_interview_transport_connection_failure", "read_interview_study_plan"];
     for (const name of names) {
       const routine = await one(
         `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
@@ -616,6 +616,59 @@ describe("live interview persistence foundation", () => {
       "select * from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
     await assert.rejects(as("anon", null, () => db.query(
       "select * from interview_turn_controls where message_id = $1", [saved.message_id])), /permission denied/);
+  });
+
+  test("the agent reads only its claimed conversation's study plan, fenced by writer generation", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const read = (generation) => pipeline(() => one(
+      "select public.read_interview_study_plan($1,$2) as plan", [conversation, generation]));
+    await assert.rejects(read(1), /not readable/, "no writer has claimed it yet");
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const { plan } = await read(generation);
+    assert.equal(plan.study_id, ids.alphaStudy);
+    assert.equal(plan.research_goal, "How small teams protect focus");
+    assert.deepEqual(plan.objectives, [{ id: "week_shape", topic: "How their week runs", priority: "high" }]);
+    assert.deepEqual(plan.assumptions, []);
+    assert.equal(Object.keys(plan).includes("workspace_id"), false);
+    await assert.rejects(read(generation - 1), /not readable/);
+    await pipeline(() => db.query("select public.claim_conversation_writer($1,$2)", [conversation, room]));
+    await assert.rejects(read(generation), /not readable/, "a replaced writer is fenced out");
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.read_interview_study_plan($1,$2)", [conversation, generation + 1])), /permission denied/);
+    await assert.rejects(as("anon", null, () => db.query(
+      "select public.read_interview_study_plan($1,$2)", [conversation, generation + 1])), /permission denied/);
+    await researcher("alice", () => db.query("update studies set status = 'completed' where id = $1", [ids.alphaStudy]));
+    try {
+      await assert.rejects(read(generation + 1), /not open for interviews/);
+    } finally {
+      await researcher("alice", () => db.query("update studies set status = 'active' where id = $1", [ids.alphaStudy]));
+    }
+  });
+
+  test("controls made under a study plan carry their own methodology version", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const signals = JSON.stringify({ intent: "continue", engagement: "neutral", covered: [], partial: [], probe: null, ambiguous: false });
+    const turn = async (key) => (await pipeline(() => one(
+      "select * from public.append_recoverable_interview_message($1,$2,$3,'text',$4,$5)",
+      [conversation, generation, key, "An answer", now()]))).message_id;
+    const record = (message, version) => pipeline(() => one(
+      "select public.record_interview_turn_control($1,$2,$3,$4::jsonb,'continue',$5,$6) as id",
+      [conversation, generation, message, signals, "b".repeat(64), version]));
+    const planned = await turn("text:planned");
+    assert.equal((await record(planned, "study-plan-v1")).id, planned);
+    assert.equal((await one("select methodology_version from interview_turn_controls where message_id = $1", [planned]))
+      .methodology_version, "study-plan-v1");
+    await assert.rejects(record(planned, "real-default-v1"), /conflicting control/);
+    await assert.rejects(record(await turn("text:unknown"), "invented-v9"), /invalid deterministic control/);
+    const legacy = await turn("text:default");
+    assert.equal((await record(legacy, "real-default-v1")).id, legacy);
   });
 
   test("immutable controls allow authorized whole-study cleanup without allowing direct deletion", async () => {
