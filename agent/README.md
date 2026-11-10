@@ -29,7 +29,12 @@ participant questions are bridged back; fatigue compresses the path; stop intent
 closes unless corrected; garbled input learns nothing; covered topics are not
 asked again. `presence.py` allows at most two gentle check-ins
 after genuine inactivity. The demo plan and its ten-minute budget apply only to
-`qalvi-demo-*` rooms; other rooms have no visuals and no budget. Requires
+`qalvi-demo-*` rooms. Real `qalvi-real-*` rooms follow the researcher's saved
+study (Milestone 5): `study.py` reads the plan for the claimed conversation
+through the fenced writer, re-validates it, and builds the steps; objectives may
+have no visual, study visuals are recorded with `issue_interview_visual` before
+they are shown and answered in words, and there is no time budget. A real room
+without a usable study plan does not start. Requires
 `livekit-agents >= 1.8`.
 
 ## When speech synthesis fails
