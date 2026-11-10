@@ -293,6 +293,9 @@ completion is recorded as `interrupted`; a shutdown racing grace expiry can leav
 `in_progress`; cancellation does not eject a connected participant; no
 mid-interview cross-project failover. Stage 2B.4B is not started.
 
+**Stage 2B.4B: DEFERRED (2026-11-10)** by user decision so Milestone 5 can start.
+Its scope and the limitations above are unchanged and remain open.
+
 Store:
 - studies
 - objectives
@@ -304,12 +307,72 @@ Store:
 
 ## Milestone 5 — Generic Study System
 
+Status: Active — started 2026-11-10. Stage 2B.4B of Milestone 4 is deferred by the
+user's decision (see DECISIONS, 2026-11-10); its known limitations carry forward
+unchanged.
+
 Goal:
 Korra is no longer hard-coded.
 
 Founder can create/configure a study.
 
 Public study link launches appropriate interview.
+
+### Plan
+
+A signed-in researcher creates and edits a real study, saved in Supabase under
+the existing workspace RLS, and gets a participant link. Opening that link starts
+the live interview driven by that study's own goal and objectives, never Korra,
+demo, or sample data.
+
+Scope:
+1. Study setup fields: title, short description, research goal, who to
+   interview, interview objectives (ordered, each with an optional priority),
+   assumptions to test, and an optional researcher-authored visual per objective
+   using only the existing four types (comparison cards, bar chart, slider,
+   multiple choice). One forward migration adds the columns, bounds checks and
+   column grants; RLS policies are unchanged.
+2. Create and edit screens under the existing researcher shell and design
+   direction, saved through the researcher's own RLS session. Draft and active
+   status; a study can be activated only with a goal and at least one objective.
+3. The study library, dashboard and study workspace read real workspace studies.
+   The sample fixtures are no longer presented as studies. Interview, participant
+   and findings tabs for a real study show honest empty states until Milestone 6.
+4. The agent loads the saved setup for its claimed conversation through a
+   service-only, writer-fenced database read on the existing trusted server
+   path. The browser never supplies or sees the study plan. The conductor plans
+   from the study's objectives; visuals appear only where the researcher defined
+   them. The control record carries a new methodology version so a study plan is
+   never replayed as the default methodology.
+5. The participant link uses the existing seven-day, single-use invitation,
+   consent, claim and resume gateway, issued from the study workspace.
+
+Exclusions:
+- Stage 2B.4B (replacement workers, completion status, cancellation ejection).
+- AI study creation or AI-authored visuals; visual types beyond the four.
+- Persisting visual displays/answers as structured evidence, researcher evidence
+  reads, findings generation and results (Milestone 6).
+- Reusable public links for many participants, recruitment, team permissions,
+  billing, study deletion, templates marketplace, and per-study time budgets.
+- Any Korra-specific logic. Korra is configured as an ordinary study.
+
+Acceptance checks:
+- A signed-in researcher can create a draft, edit it, and activate it; reload
+  shows the saved values. Another workspace cannot read or edit it (RLS tests).
+- Invalid setups (no goal, no objectives on activation, malformed visuals) are
+  rejected by the application validator and by database checks.
+- The study library, dashboard and workspace list only real studies.
+- The workspace issues a participant link only for an active study; the link
+  shows the study's title, consent, then the live room.
+- The agent's study read is refused for a stale writer generation and for
+  `anon`/`authenticated` roles; the conductor's goal, objectives and visuals
+  come from the saved study (Python tests). Demo rooms keep the demo plan.
+- TypeScript, lint, production build, all Node tests (including database/RLS)
+  and all Python tests pass.
+- Live acceptance (requires the user's approval and sign-in): apply the
+  migration to the linked project, deploy both workers, then run one real
+  invitation end to end and confirm the opening and first questions follow the
+  study's goal and objectives.
 
 ## Milestone 6 — Founder Results
 

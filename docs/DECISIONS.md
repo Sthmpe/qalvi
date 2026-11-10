@@ -644,3 +644,17 @@ the history table does not store. `20261007000100` is byte-identical.
 Stage 2B.4A is CLOSED. Stage 2B.4B (replacement worker after worker loss,
 post-grace orphan rooms, natural completion status, the `in_progress` shutdown
 boundary, cancellation ejection) has not started.
+
+## 2026-11-10 — Defer Stage 2B.4B; start Milestone 5
+
+Decision (user): Milestone 4 Stage 2B.4B is deferred. Milestone 5, the Generic
+Study System, starts now. 2B.4B's scope (replacement worker after worker loss,
+post-grace orphan rooms, natural completion status, the `in_progress` shutdown
+boundary, cancellation ejection) is not abandoned and its known limitations stay
+documented in ARCHITECTURE and ROADMAP. Milestone 5 must not depend on any of it.
+
+Milestone 5 goal: a signed-in researcher creates and edits a real study (goal,
+who to interview, objectives, assumptions, optional use of the existing four
+visual types) saved in Supabase under the existing RLS, and gets a participant
+link that starts a live interview driven by that study. The plan, exclusions and
+acceptance checks are in ROADMAP.
