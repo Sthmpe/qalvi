@@ -374,6 +374,29 @@ Acceptance checks:
   invitation end to end and confirm the opening and first questions follow the
   study's goal and objectives.
 
+### Progress (2026-11-10)
+
+Implemented locally, steps 1 to 4 of the plan:
+- study create/edit screens, saved through the researcher's RLS session; the
+  library, dashboard and workspace read real studies; sample fixtures removed
+- migrations `20261110000100_study_setup.sql` and
+  `20261110000200_study_interview_plan.sql`
+- the agent reads its claimed conversation's study plan (writer-fenced,
+  service-only), builds the conductor plan and interviewer context from it,
+  and refuses to start without one; study visuals are issued as durable
+  evidence before display and answered in words in real rooms
+- per-study participant links from the overview via the existing gateway
+
+Validation: production build, TypeScript (after the build generates route
+types), lint, 118 Node tests (including database/RLS on PGlite) and 121 Python
+tests pass. No failures needed fixing.
+
+Not yet done, needs the user's approval and sign-in: applying both migrations
+to the linked Qalvi project, regenerating `src/types/database.ts` from it (the
+study columns were added by hand to match the migration), deploying the
+corrected agent source to both LiveKit workers, and one live end-to-end
+acceptance run. Milestone 5 is not accepted until then.
+
 ## Milestone 6 — Founder Results
 
 Goal:

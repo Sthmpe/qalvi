@@ -658,3 +658,34 @@ who to interview, objectives, assumptions, optional use of the existing four
 visual types) saved in Supabase under the existing RLS, and gets a participant
 link that starts a live interview driven by that study. The plan, exclusions and
 acceptance checks are in ROADMAP.
+
+## 2026-11-10 — Milestone 5 study system decisions
+
+Study setup lives on `studies`: `objectives` is an ordered JSONB array because
+each objective may carry a researcher-authored visual whose fields vary by type;
+`assumptions` is a text array. One validator (`src/lib/studies/setup.ts`) serves
+the editor and the server action, and database checks repeat the bounds. An
+active study needs a goal, an audience and at least one objective. RLS policies
+are unchanged; only column grants were added.
+
+The study reaches the agent through the existing trusted path, not through
+LiveKit token, room or dispatch metadata: invitation, consent claim,
+conversation, fenced writer claim, then a service-only
+`read_interview_study_plan` keyed to the conversation and writer generation.
+That keeps one source of truth, works in both single-project and multi-profile
+LiveKit modes, and never exposes the plan to the browser. A real interview
+without a usable plan does not start.
+
+Visuals stay researcher-authored; the LLM never authors one. In real rooms the
+on-screen answer path is still blocked because structured answers need the
+atomic visual-response RPC and a control record on the `visual` channel, which
+the accepted 2B.4A control protocol does not allow. Rather than change that
+protocol in this milestone, a study visual is recorded with the existing
+`issue_interview_visual` before it is shown, rendered as reference material,
+and answered by speaking or typing, so the answer is ordinary canonical
+evidence with its control record. Tap-to-answer in real rooms is later work.
+
+Study controls carry methodology `study-plan-v1` so they are never replayed as
+the planless default; the default replay refuses them. Study replay for a
+replacement worker belongs to deferred Stage 2B.4B. Per-study time budgets are
+not included; real interviews have no fixed limit, as before.
