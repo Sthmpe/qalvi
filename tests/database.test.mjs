@@ -142,7 +142,10 @@ before(async () => {
     "insert into studies (workspace_id, title) values ($1, 'Focused work') returning id", [ids.alpha])).id);
   ids.betaStudy = await researcher("carol", async () => (await one(
     "insert into studies (workspace_id, title) values ($1, 'Pricing') returning id", [ids.beta])).id);
-  await researcher("alice", () => db.query("update studies set status = 'active' where id = $1", [ids.alphaStudy]));
+  await researcher("alice", () => db.query(
+    `update studies set status = 'active', research_goal = 'How small teams protect focus',
+       audience = 'Team leads', objectives = $2::jsonb where id = $1`,
+    [ids.alphaStudy, JSON.stringify([{ id: "week_shape", topic: "How their week runs", priority: "high" }])]));
 
   await pipeline(async () => {
     ids.conversation = await conversationIn(ids.alpha, ids.alphaStudy, "Participant 01");
@@ -559,7 +562,10 @@ describe("live interview persistence foundation", () => {
     await assert.rejects(pipeline(() => db.query(
       "update visual_displays set prompt = 'rewritten' where id = $1", [displayId])), /immutable/);
     const wrongStudy = await issueInvitation(ids.betaStudy, ids.beta, users.carol);
-    await pipeline(() => db.query("update studies set status = 'active' where id = $1", [ids.betaStudy]));
+    await pipeline(() => db.query(
+      `update studies set status = 'active', research_goal = 'Pricing confidence', audience = 'Buyers',
+         objectives = '[{"id":"value","topic":"How they judge value","priority":"high"}]' where id = $1`,
+      [ids.betaStudy]));
     const otherConversation = await claim(wrongStudy.token);
     const otherRoom = (await one("select livekit_room from conversations where id = $1", [otherConversation])).livekit_room;
     const otherGeneration = (await pipeline(() => one(
@@ -614,7 +620,9 @@ describe("live interview persistence foundation", () => {
 
   test("immutable controls allow authorized whole-study cleanup without allowing direct deletion", async () => {
     const study = (await pipeline(() => one(
-      "insert into studies (workspace_id, title, status) values ($1,'Control cascade cleanup','active') returning id",
+      `insert into studies (workspace_id, title, status, research_goal, audience, objectives)
+       values ($1,'Control cascade cleanup','active','Cleanup','Anyone',
+               '[{"id":"one","topic":"One topic","priority":"low"}]') returning id`,
       [ids.alpha]))).id;
     const invite = await issueInvitation(study, ids.alpha, users.alice);
     const room = `qalvi-real-${randomUUID()}`;
@@ -777,6 +785,85 @@ describe("findings and their evidence", () => {
     for (const table of ["participants", "conversations", "messages", "findings", "finding_evidence"]) {
       assert.equal((await one(`select count(*)::int as n from ${table} where study_id = $1`, [study])).n, 0, table);
     }
+  });
+});
+
+describe("study setup (Milestone 5)", () => {
+  const objective = (id, extra = {}) => ({ id, topic: `Topic ${id}`, priority: "high", ...extra });
+  const create = (who, workspace, fields = {}) => researcher(who, async () => (await one(
+    `insert into studies (workspace_id, title, research_goal, audience, objectives, assumptions, status)
+     values ($1, $2, $3, $4, $5::jsonb, $6::text[], $7) returning id`,
+    [workspace, fields.title ?? "Setup study", fields.goal ?? null, fields.audience ?? null,
+     JSON.stringify(fields.objectives ?? []), fields.assumptions ?? [], fields.status ?? "draft"])).id);
+
+  test("members create, edit, and read a study setup; other workspaces cannot see or change it", async () => {
+    const id = await create("alice", ids.alpha, {
+      goal: "Why teams switch tools", audience: "Ops leads",
+      objectives: [objective("switch_moment"), objective("pricing", {
+        priority: "low",
+        visual: { type: "slider", id: "study-pricing", prompt: "What would you pay?", min: 0, max: 100, step: 5, initial: 20 },
+      })],
+      assumptions: ["Teams switch after a bad quarter"],
+    });
+    await researcher("bob", () => db.query(
+      "update studies set objectives = $2::jsonb, status = 'active' where id = $1",
+      [id, JSON.stringify([objective("switch_moment")])]));
+    const saved = await researcher("alice", () => one("select status, objectives, assumptions from studies where id = $1", [id]));
+    assert.equal(saved.status, "active");
+    assert.deepEqual(saved.objectives, [objective("switch_moment")]);
+    assert.deepEqual(saved.assumptions, ["Teams switch after a bad quarter"]);
+    assert.equal((await researcher("carol", () => rows("select id from studies where id = $1", [id]))).length, 0);
+    const changed = await researcher("carol", () => db.query(
+      "update studies set research_goal = 'stolen' where id = $1", [id]));
+    assert.equal(changed.affectedRows ?? 0, 0);
+    assert.equal((await researcher("alice", () => one("select research_goal from studies where id = $1", [id]))).research_goal,
+      "Why teams switch tools");
+    await assert.rejects(create("carol", ids.alpha), /row-level security|violates/);
+    await assert.rejects(as("anon", null, () => db.query("select objectives from studies")), /permission denied/);
+  });
+
+  test("malformed setups are rejected by the database, whoever writes them", async () => {
+    const bad = [
+      [{ id: "Bad Id", topic: "x", priority: "high" }],
+      [{ id: "ok", topic: " ", priority: "high" }],
+      [{ id: "ok", topic: "x", priority: "urgent" }],
+      [{ id: "ok", topic: "x", priority: "high", extra: true }],
+      [objective("dup"), objective("dup")],
+      [objective("v", { visual: { type: "line_chart", id: "study-v", prompt: "x" } })],
+      [objective("v", { visual: { type: "slider", id: "other", prompt: "x" } })],
+      [objective("v", { visual: { type: "slider", id: "study-v", prompt: "" } })],
+      Array.from({ length: 11 }, (_, index) => objective(`o${index}`)),
+      { not: "an array" },
+    ];
+    for (const objectives of bad) {
+      await assert.rejects(create("alice", ids.alpha, { objectives }), /studies_objectives_check/, JSON.stringify(objectives));
+    }
+    await assert.rejects(create("alice", ids.alpha, { assumptions: [" "] }), /studies_assumptions_check/);
+    await assert.rejects(create("alice", ids.alpha, { assumptions: Array.from({ length: 11 }, (_, i) => `a${i}`) }),
+      /studies_assumptions_check/);
+    await assert.rejects(pipeline(() => db.query(
+      "update studies set objectives = '[{\"id\":\"x\"}]'::jsonb where id = $1", [ids.alphaStudy])),
+      /studies_objectives_check/);
+  });
+
+  test("a study can only become active with a goal, an audience, and at least one objective", async () => {
+    await assert.rejects(create("alice", ids.alpha, { status: "active", goal: "A goal", audience: "People" }),
+      /studies_active_setup_check/);
+    await assert.rejects(create("alice", ids.alpha, { status: "active", audience: "People", objectives: [objective("a")] }),
+      /studies_active_setup_check/);
+    const draft = await create("alice", ids.alpha, { goal: "A goal", objectives: [objective("a")] });
+    await assert.rejects(researcher("alice", () => db.query("update studies set status = 'active' where id = $1", [draft])),
+      /studies_active_setup_check/);
+    await researcher("alice", () => db.query("update studies set audience = 'People', status = 'active' where id = $1", [draft]));
+    await assert.rejects(researcher("alice", () => db.query("update studies set objectives = '[]' where id = $1", [draft])),
+      /studies_active_setup_check/);
+  });
+
+  test("researchers still cannot move a study between workspaces or delete it", async () => {
+    const id = await create("alice", ids.alpha, { goal: "Goal" });
+    await assert.rejects(researcher("alice", () => db.query(
+      "update studies set workspace_id = $2 where id = $1", [id, ids.beta])), /permission denied/);
+    await assert.rejects(researcher("alice", () => db.query("delete from studies where id = $1", [id])), /permission denied/);
   });
 });
 

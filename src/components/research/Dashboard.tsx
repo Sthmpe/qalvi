@@ -3,19 +3,16 @@ import {
   Badge,
   ButtonLink,
   Card,
+  EmptyState,
   PageHeading,
   QalviOrb,
   SectionHeading,
 } from "@/components/ui/primitives";
-import {
-  conversations,
-  findings,
-  studies,
-  templates,
-} from "@/lib/research/mock-data";
+import { templates } from "@/lib/research/templates";
+import type { StudyCounts, StudySummary } from "@/lib/studies/queries";
 import StudyCard from "./StudyCard";
 
-export default function Dashboard() {
+export default function Dashboard({ studies, counts }: { studies: StudySummary[]; counts: StudyCounts }) {
   return (
     <>
       <PageHeading
@@ -49,23 +46,23 @@ export default function Dashboard() {
           <span>Space to speak. Room to discover.</span>
         </div>
       </section>
-      <div className="research-stats" aria-label="Sample research counts">
+      <div className="research-stats" aria-label="Research counts">
         <div>
           <strong>{studies.length.toString().padStart(2, "0")}</strong>
           <span>Studies taking shape</span>
         </div>
         <div>
-          <strong>{conversations.length.toString().padStart(2, "0")}</strong>
+          <strong>{counts.conversations.toString().padStart(2, "0")}</strong>
           <span>Conversations to learn from</span>
         </div>
         <div>
-          <strong>{findings.length.toString().padStart(2, "0")}</strong>
+          <strong>{counts.findings.toString().padStart(2, "0")}</strong>
           <span>Findings linked to evidence</span>
         </div>
         <p>
-          Sample data
+          Saved evidence
           <br />
-          <span>A preview of your research home</span>
+          <span>Counted from your workspace</span>
         </p>
       </div>
       <section>
@@ -78,11 +75,19 @@ export default function Dashboard() {
             </Link>
           }
         />
-        <div className="study-grid">
-          {studies.map((study) => (
-            <StudyCard key={study.id} study={study} />
-          ))}
-        </div>
+        {studies.length ? (
+          <div className="study-grid">
+            {studies.slice(0, 6).map((study) => (
+              <StudyCard key={study.id} study={study} />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="No studies yet"
+            description="Start with a decision you need to make. Pick a starting point below, or begin from a blank question."
+            action={<ButtonLink href="/studies/new">Create a study</ButtonLink>}
+          />
+        )}
       </section>
       <section>
         <SectionHeading
@@ -116,8 +121,8 @@ export default function Dashboard() {
             the source of truth.
           </p>
         </div>
-        <Link href="/studies/everyday-work/interviews" className="text-link">
-          Explore the evidence <span aria-hidden="true">→</span>
+        <Link href="/studies" className="text-link">
+          Go to your studies <span aria-hidden="true">→</span>
         </Link>
       </Card>
     </>

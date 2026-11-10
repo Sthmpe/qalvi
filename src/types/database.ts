@@ -487,12 +487,14 @@ export type Database = {
       }
       studies: {
         Row: {
+          assumptions: string[]
           audience: string | null
           category: string | null
           created_at: string
           created_by: string | null
           description: string | null
           id: string
+          objectives: Json
           research_goal: string | null
           status: string
           title: string
@@ -500,12 +502,14 @@ export type Database = {
           workspace_id: string
         }
         Insert: {
+          assumptions?: string[]
           audience?: string | null
           category?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
           id?: string
+          objectives?: Json
           research_goal?: string | null
           status?: string
           title: string
@@ -513,12 +517,14 @@ export type Database = {
           workspace_id: string
         }
         Update: {
+          assumptions?: string[]
           audience?: string | null
           category?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
           id?: string
+          objectives?: Json
           research_goal?: string | null
           status?: string
           title?: string

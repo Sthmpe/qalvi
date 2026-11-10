@@ -1,33 +1,27 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/primitives";
-import {
-  studyConversations,
-  studyFindings,
-  type Study,
-} from "@/lib/research/mock-data";
+import { STATUS_LABEL, formatDate } from "@/lib/studies/setup";
+import type { StudySummary } from "@/lib/studies/queries";
 
-export default function StudyCard({ study }: { study: Study }) {
-  const interviewCount = studyConversations(study.id).length;
-  const findingCount = studyFindings(study.id).length;
+export default function StudyCard({ study }: { study: StudySummary }) {
+  const objectives = study.objectives.length;
   return (
     <Link className="q-card study-card" href={`/studies/${study.id}`}>
       <div className="study-card-top">
-        <span className="q-eyebrow">{study.category}</span>
-        <Badge tone={study.status === "Active" ? "indigo" : "neutral"}>
-          {study.status}
-        </Badge>
+        <span className="q-eyebrow">{study.category || "Study"}</span>
+        <Badge tone={study.status === "active" ? "indigo" : "neutral"}>{STATUS_LABEL[study.status]}</Badge>
       </div>
       <h3>{study.title}</h3>
-      <p>{study.description}</p>
+      <p>{study.description || study.researchGoal || "No research goal yet."}</p>
       <div className="study-card-footer">
         <span>
-          <strong>{interviewCount}</strong> {interviewCount === 1 ? "interview" : "interviews"}
+          <strong>{study.conversations}</strong> {study.conversations === 1 ? "conversation" : "conversations"}
           <span className="count-divider">/</span>
-          <strong>{findingCount}</strong> {findingCount === 1 ? "finding" : "findings"}
+          <strong>{objectives}</strong> {objectives === 1 ? "objective" : "objectives"}
+          <span className="count-divider">/</span>
+          {formatDate(study.updatedAt)}
         </span>
-        <span aria-hidden="true" className="card-arrow">
-          ↗
-        </span>
+        <span aria-hidden="true" className="card-arrow">↗</span>
       </div>
     </Link>
   );

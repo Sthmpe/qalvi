@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
-import { getStudy } from "@/lib/research/mock-data";
 import { StudyWorkspace } from "@/components/research/StudyWorkspace";
+import { getStudy } from "@/lib/studies/queries";
 export default async function StudyLayout({
   children,
   params,
@@ -8,7 +8,7 @@ export default async function StudyLayout({
   children: React.ReactNode;
   params: Promise<{ studyId: string }>;
 }) {
-  const study = getStudy((await params).studyId);
+  const study = await getStudy((await params).studyId);
   if (!study) notFound();
   return <StudyWorkspace study={study}>{children}</StudyWorkspace>;
 }

@@ -52,8 +52,8 @@ export default function ResearchShell({
           </p>
         </div>
         <div className="sidebar-footer">
-          <span className="sample-dot" /> Sample data
-          <small>Illustrative studies · nothing is stored yet</small>
+          <span className="sample-dot" /> Saved in your workspace
+          <small>Studies and evidence stay private to your team</small>
         </div>
       </aside>
       <div className="research-body">
@@ -66,7 +66,6 @@ export default function ResearchShell({
             Qalvi
           </Link>
           <div className="header-end">
-            <span className="header-preview">Sample data</span>
             <span className="q-avatar" aria-label={workspace}>
               {monogram}
             </span>

@@ -3,8 +3,8 @@ import { ButtonLink, EmptyState } from "@/components/ui/primitives";
 export default function ResearchNotFound() {
   return (
     <EmptyState
-      title="This study isn't in the preview"
-      description="Choose one of the sample studies to explore the research workspace."
+      title="We couldn’t find that study"
+      description="It may have moved, or it belongs to another workspace. Choose a study from your library."
       action={<ButtonLink href="/studies">Explore studies</ButtonLink>}
     />
   );
