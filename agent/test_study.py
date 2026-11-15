@@ -1,7 +1,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from clock import InterviewClock
 from conductor import Conductor
@@ -10,7 +10,8 @@ from persistence import EvidenceError, EvidenceWriter
 from recovery import RecoveryError, control_data, replay_conductor
 from signals import Signals
 from study import METHODOLOGY, StudyPlanError, build_plan, study_context, validate_visual
-from visuals import DEMO_STEPS, RESPONSE_PREFIX
+from turn_input import handle_text_input
+from visuals import DEMO_STEPS, RESPONSE_PREFIX, describe_answer
 
 CARDS = {"type": "comparison_cards", "id": "study-choice", "prompt": "Which fits your team?",
          "options": [{"id": "o1", "label": "Build it", "description": "In-house"},
@@ -41,7 +42,7 @@ ENGAGED = Signals(intent="continue", engagement="engaged", probe=True)
 
 def study_conductor(plan):
     return Conductor(list(plan.steps), InterviewClock(None), goal=plan.goal,
-                     methodology=METHODOLOGY, answer_in_words=True)
+                     methodology=METHODOLOGY)
 
 
 class StudyPlanTests(unittest.TestCase):
@@ -95,10 +96,9 @@ class StudyConductorTests(unittest.TestCase):
         covered = conductor.turn("It broke during month-end, so we bought a tool.",
                                  Signals(intent="continue", engagement="engaged", covered=("last_switch",)))
         self.assertEqual(covered.display["id"], "study-choice")
-        self.assertIn("saying or typing", covered.guidance)
-        self.assertNotIn("tap the card", covered.guidance)
-        state = conductor.visual_state()
-        self.assertIn("Nothing on it can be tapped here", state["action"])
+        self.assertIn("tap the card that fits best", covered.guidance)
+        self.assertIn("simply answer aloud", covered.guidance)
+        self.assertIn("choose the one card", conductor.visual_state()["action"])
 
     def test_spoken_answer_to_a_visual_retires_it_like_any_covered_objective(self):
         conductor = study_conductor(build_plan(saved_plan(objectives=[saved_plan()["objectives"][1]])))
@@ -188,6 +188,99 @@ class StudyPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api.rpc.await_args.args[1]["p_methodology_version"], "study-plan-v1")
         with self.assertRaises(EvidenceError):
             await writer.record_control("message-1", {**control, "methodology_version": "invented-v9"})
+
+
+class VisualAnswerTests(unittest.IsolatedAsyncioTestCase):
+    def test_answers_are_rebuilt_from_the_display_and_mismatches_are_refused(self):
+        self.assertEqual(describe_answer(CARDS, {"actionId": "study-choice", "type": "comparison_cards", "optionId": "o2"}),
+                         ('Chose "Buy it"', ["o2"], None))
+        self.assertEqual(describe_answer(SLIDER, {"actionId": "study-price", "type": "slider", "value": 120}),
+                         ("Set 120 USD", [], 120))
+        choice = {"type": "multiple_choice", "id": "study-c", "prompt": "Which?", "multiple": True,
+                  "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}
+        self.assertEqual(describe_answer(choice, {"actionId": "study-c", "type": "multiple_choice", "optionIds": ["a", "b"]}),
+                         ('Chose "A", "B"', ["a", "b"], None))
+        for display, response in [
+            (CARDS, {"actionId": "study-other", "type": "comparison_cards", "optionId": "o1"}),
+            (CARDS, {"actionId": "study-choice", "type": "comparison_cards", "optionId": "invented"}),
+            (CARDS, {"actionId": "study-choice", "type": "slider", "value": 1}),
+            (SLIDER, {"actionId": "study-price", "type": "slider", "value": 900}),
+            (SLIDER, {"actionId": "study-price", "type": "slider", "value": True}),
+            ({**choice, "multiple": False}, {"actionId": "study-c", "type": "multiple_choice", "optionIds": ["a", "b"]}),
+            (choice, {"actionId": "study-c", "type": "multiple_choice", "optionIds": ["a", "a"]}),
+            (CARDS, "not an object"),
+        ]:
+            self.assertIsNone(describe_answer(display, response), response)
+
+    def _room(self, sent):
+        return SimpleNamespace(local_participant=SimpleNamespace(
+            send_text=AsyncMock(side_effect=lambda text, topic: sent.append((topic, json.loads(text) if topic == "qalvi.evidence" else text)))))
+
+    def _event(self, text, visual):
+        attributes = {"qalvi.event_id": "00000000-0000-4000-8000-0000000000aa"}
+        if visual is not None:
+            attributes["qalvi.visual"] = json.dumps(visual)
+        return SimpleNamespace(text=text, participant=SimpleNamespace(identity="participant-1"),
+                               info=SimpleNamespace(attributes=attributes, stream_id="s1", timestamp=1_700_000_000_000))
+
+    def _agent(self, conductor):
+        class Claim:
+            async def __aenter__(self): return None
+            async def __aexit__(self, *_): return False
+        agent = SimpleNamespace(_paused=False, _advanced_turns=set(), _conductor=conductor,
+                                flush_assistant=AsyncMock(), pause_evidence=AsyncMock(),
+                                present=AsyncMock(return_value="guidance"), mark_evidence_ack=Mock())
+        session = SimpleNamespace(_claim_user_turn=lambda: Claim(), interrupt=AsyncMock(), generate_reply=Mock())
+        return agent, session
+
+    async def test_a_tapped_answer_is_saved_as_structured_evidence_before_the_reply(self):
+        conductor = study_conductor(build_plan(saved_plan(objectives=[saved_plan()["objectives"][1]])))
+        conductor.turn("Hard to say.", ENGAGED)
+        agent, session = self._agent(conductor)
+        order, sent = [], []
+        writer = SimpleNamespace(
+            acknowledge_visual=AsyncMock(side_effect=lambda action: order.append(("render", action))),
+            append_visual_answer=AsyncMock(side_effect=lambda *args: order.append(("answer", args[1:3], args[4], args[5]))
+                                           or SimpleNamespace(id="message-9", sequence=4, inserted=True)))
+        agent.present.side_effect = lambda *args: order.append(("present", args[0])) or "guidance"
+        await handle_text_input(session, self._event('[On screen] Chose "whatever the browser says"',
+                                                     {"actionId": "study-choice", "type": "comparison_cards", "optionId": "o2"}),
+                                agent, writer, self._room(sent), "participant-1")
+        self.assertEqual(order, [("render", "study-choice"),
+                                 ("answer", ("study-choice", 'Chose "Buy it"'), ["o2"], None),
+                                 ("present", '[On screen] Chose "Buy it"')])
+        self.assertEqual(writer.append_visual_answer.await_args.args[0], "visual:00000000-0000-4000-8000-0000000000aa")
+        self.assertEqual(sent, [("qalvi.evidence", {"eventId": "00000000-0000-4000-8000-0000000000aa", "status": "saved",
+                                                    "messageId": "message-9", "sequence": 4})])
+        session.generate_reply.assert_called_once_with(user_input='[On screen] Chose "Buy it"', instructions="guidance")
+
+    async def test_an_answer_with_no_matching_visual_on_screen_is_refused_and_writes_nothing(self):
+        conductor = study_conductor(build_plan(saved_plan()))
+        agent, session = self._agent(conductor)
+        writer = SimpleNamespace(acknowledge_visual=AsyncMock(), append_visual_answer=AsyncMock(), append=AsyncMock())
+        for visual in ({"actionId": "study-choice", "type": "comparison_cards", "optionId": "o2"}, None):
+            sent = []
+            await handle_text_input(session, self._event("[On screen] Chose something", visual),
+                                    agent, writer, self._room(sent), "participant-1")
+            self.assertEqual(sent[0][1]["status"], "failed")
+        writer.append_visual_answer.assert_not_awaited()
+        writer.append.assert_not_awaited()
+        agent.present.assert_not_awaited()
+
+    def test_a_saved_visual_answer_replays_with_its_on_screen_marker(self):
+        plan = build_plan(saved_plan(objectives=[saved_plan()["objectives"][1]]))
+        live = study_conductor(plan)
+        rows, controls = [], []
+        for sequence, (content, channel, signals) in enumerate([
+                ("Hard to say.", "text", ENGAGED), ('Chose "Buy it"', "visual", Signals(probe=False))]):
+            row = {"id": f"m{sequence}", "sequence": sequence, "speaker": "participant", "content": content,
+                   "channel": channel, "control_protocol_version": 1}
+            text = f"{RESPONSE_PREFIX} {content}" if channel == "visual" else content
+            controls.append({"message_id": row["id"], **control_data(live, signals, live.turn(text, signals))})
+            rows.append(row)
+        recovered = plan_recovery(rows, controls, True, study_conductor(plan)).conductor
+        self.assertTrue(recovered.answered)
+        self.assertEqual(recovered.learned, ["choice"])
 
 
 class VisualEvidenceOrderTests(unittest.IsolatedAsyncioTestCase):

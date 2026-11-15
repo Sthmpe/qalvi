@@ -271,6 +271,49 @@ class EvidenceWriter:
                     raise
                 await asyncio.sleep(0.2 * (attempt + 1))
 
+    async def acknowledge_visual(self, action_id: str) -> None:
+        """One-time receipt that an issued visual reached the participant's screen."""
+        result = await self.api.rpc("acknowledge_interview_visual", {
+            "p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+            "p_action_id": action_id,
+        })
+        if not isinstance(result, str):
+            raise EvidenceError("Visual render acknowledgement malformed")
+
+    async def append_visual_answer(self, key: str, action_id: str, content: str, timestamp: str,
+                                   option_ids: list[str], numeric: float | None) -> SavedMessage:
+        """The answer message and its structured response, in one transaction.
+
+        The database rejects an answer that does not match the display it was
+        shown. A retry with the same key and payload returns the original row.
+        """
+        payload = (action_id, content, timestamp, tuple(option_ids), numeric)
+        async with self._lock:
+            if self._events.setdefault(key, payload) != payload:
+                raise EvidenceError("Conflicting evidence event key")
+            if key in self._saved:
+                return self._saved[key]
+            args = {"p_conversation_id": self.conversation_id, "p_writer_generation": self.generation,
+                    "p_event_key": key, "p_action_id": action_id, "p_content": content,
+                    "p_occurred_at": timestamp, "p_selected_option_ids": option_ids,
+                    "p_numeric_value": numeric}
+            uncertain = False
+            for attempt in range(3):
+                try:
+                    rows = await self.api.rpc("append_interview_visual_response", args)
+                    if not isinstance(rows, list) or len(rows) != 1:
+                        raise EvidenceError("Evidence acknowledgement malformed")
+                    saved = SavedMessage(rows[0]["message_id"], rows[0]["message_sequence"],
+                                         bool(rows[0]["inserted"] or uncertain))
+                    self._saved[key] = saved
+                    return saved
+                except EvidenceError as exc:
+                    if attempt == 2 or not exc.retryable:
+                        raise
+                    uncertain = True
+                    await asyncio.sleep(0.2 * (attempt + 1))
+            raise EvidenceError("Evidence acknowledgement unavailable")
+
     async def interrupt(self) -> None:
         try:
             await self.api.rpc("transition_interview_conversation", {

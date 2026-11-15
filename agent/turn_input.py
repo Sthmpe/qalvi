@@ -4,8 +4,22 @@ import json
 from datetime import datetime, timezone
 
 from persistence import EVENT_ID, EvidenceError, occurred_at
+from visuals import RESPONSE_PREFIX, describe_answer
 
 EVIDENCE_TOPIC = "qalvi.evidence"
+
+
+def _visual_answer(agent, attributes: dict) -> tuple[str, str, list[str], float | None] | None:
+    conductor = getattr(agent, "_conductor", None)
+    display = conductor.on_screen.display if conductor and conductor.pending_visual() else None
+    if display is None:
+        return None
+    try:
+        response = json.loads(attributes.get("qalvi.visual", ""))
+    except (TypeError, ValueError):
+        return None
+    described = describe_answer(display, response)
+    return (display["id"], *described) if described else None
 
 
 async def handle_text_input(sess, event, agent, writer, room, real_identity):
@@ -26,10 +40,15 @@ async def _handle_claimed_text_input(sess, event, agent, writer, room, real_iden
                 return
             supplied_id = event.info.attributes.get("qalvi.event_id") if event.info.attributes else None
             event_id = supplied_id if supplied_id and EVENT_ID.fullmatch(supplied_id) else event.info.stream_id
-            if event.text.startswith("[On screen]"):
-                await room.local_participant.send_text(
-                    json.dumps({"eventId": event_id, "status": "failed"}), topic=EVIDENCE_TOPIC)
-                return  # visual evidence belongs to the later atomic visual-response path
+            visual = None
+            if event.text.startswith(RESPONSE_PREFIX):
+                # Never trust the browser's wording: rebuild the answer from the visual
+                # this agent actually displayed, or refuse it.
+                visual = _visual_answer(agent, event.info.attributes or {})
+                if visual is None:
+                    await room.local_participant.send_text(
+                        json.dumps({"eventId": event_id, "status": "failed"}), topic=EVIDENCE_TOPIC)
+                    return
             stamped_at = event.info.attributes.get("qalvi.event_at") if event.info.attributes else None
             try:
                 when = datetime.fromisoformat(stamped_at) if stamped_at else None
@@ -38,13 +57,20 @@ async def _handle_claimed_text_input(sess, event, agent, writer, room, real_iden
                     stamped_at = None
             except (TypeError, ValueError):
                 stamped_at = None
-            key = "text:" + event_id
+            key = ("visual:" if visual else "text:") + event_id
+            when_text = stamped_at or occurred_at(event.info.timestamp / 1000)
             try:
                 if key not in agent._advanced_turns:
                     await sess.interrupt()
                     await agent.flush_assistant()
-                saved = await writer.append(key, "participant", "text", event.text,
-                                            stamped_at or occurred_at(event.info.timestamp / 1000))
+                if visual:
+                    action_id, content, option_ids, numeric = visual
+                    await writer.acknowledge_visual(action_id)  # an answer proves it was rendered
+                    saved = await writer.append_visual_answer(key, action_id, content, when_text, option_ids, numeric)
+                    turn_text = f"{RESPONSE_PREFIX} {content}"
+                else:
+                    saved = await writer.append(key, "participant", "text", event.text, when_text)
+                    turn_text = event.text
             except EvidenceError:
                 await agent.pause_evidence()
                 try:
@@ -65,15 +91,16 @@ async def _handle_claimed_text_input(sess, event, agent, writer, room, real_iden
             agent._advanced_turns.add(key)
             marker = getattr(agent, "mark_evidence_ack", None)
             if marker:
-                marker("text", saved.sequence)
+                marker("visual" if visual else "text", saved.sequence)
         else:
             await sess.interrupt()
+            turn_text = event.text
         try:
-            guidance = await agent.present(event.text, saved if writer else None)
+            guidance = await agent.present(turn_text, saved if writer else None)
         except EvidenceError:
             await agent.pause_evidence()
             return
         if guidance:
-            sess.generate_reply(user_input=event.text, instructions=guidance)
+            sess.generate_reply(user_input=turn_text, instructions=guidance)
         else:
-            sess.generate_reply(user_input=event.text)
+            sess.generate_reply(user_input=turn_text)

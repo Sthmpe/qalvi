@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 DISPLAY_TOPIC = "qalvi.display"
+DISPLAY_RENDERED_TOPIC = "qalvi.display.rendered"  # browser receipt that a visual was shown
 RESPONSE_PREFIX = "[On screen]"
 
 # What each predefined visual is actually good for. Used when a topic has been
@@ -38,16 +39,6 @@ VISUAL_ACTION = {
     "slider": "move the slider to the value they mean, then confirm it.",
     "multiple_choice": "pick every choice that applies, one or several, then confirm.",
 }
-# In a real study room the screen is reference material: an on-screen answer must be
-# saved as atomic visual evidence, which is not wired yet, so the participant answers
-# in words and that answer is ordinary canonical evidence.
-VISUAL_ACTION_IN_WORDS = {
-    **VISUAL_ACTION,
-    "comparison_cards": "read the cards and say or type which one fits best. Nothing on it can be tapped here.",
-    "slider": "read the range and say or type roughly where they are on it. Nothing on it can be moved here.",
-    "multiple_choice": "read the choices and say or type which apply. Nothing on it can be tapped here.",
-}
-
 DEMO_GOAL = (
     "how the participant currently manages competing priorities in a working week, "
     "and what gets in the way"
@@ -166,3 +157,34 @@ DEMO_STEPS: list[Step] = [
 def demo_steps_for_room(room_name: str) -> list[Step]:
     """Only explicitly named demo rooms get the demo plan; other rooms have no visuals."""
     return list(DEMO_STEPS) if room_name.startswith("qalvi-demo-") else []
+
+
+def describe_answer(display: dict, response) -> tuple[str, list[str], float | None] | None:
+    """Check a structured on-screen answer against what was actually displayed.
+
+    Returns the transcript sentence, the chosen option ids, and the numeric value,
+    or None when the answer does not fit the display. The sentence is built here
+    from the display itself, so the browser's own wording is never stored.
+    """
+    if not isinstance(response, dict) or response.get("actionId") != display.get("id") \
+            or response.get("type") != display.get("type"):
+        return None
+    kind = display["type"]
+    if kind in ("comparison_cards", "multiple_choice"):
+        labels = {option["id"]: option["label"] for option in display["options"]}
+        chosen = [response.get("optionId")] if kind == "comparison_cards" else response.get("optionIds")
+        if not isinstance(chosen, list) or not chosen or len(set(chosen)) != len(chosen) or \
+                any(not isinstance(item, str) or item not in labels for item in chosen):
+            return None
+        if kind == "multiple_choice" and len(chosen) > 1 and not display.get("multiple"):
+            return None
+        return "Chose " + ", ".join(f'"{labels[item]}"' for item in chosen), chosen, None
+    if kind == "slider":
+        value = response.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or \
+                not display["min"] <= value <= display["max"]:
+            return None
+        unit = display.get("unit")
+        shown = f"{value:g}"
+        return "Set " + (shown if not unit else f"{shown}%" if unit == "%" else f"{shown} {unit}"), [], value
+    return None  # a chart has no controls, so it has no structured answer

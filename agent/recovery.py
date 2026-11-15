@@ -12,6 +12,7 @@ import json
 from clock import InterviewClock
 from conductor import Conductor, Decision
 from signals import Signals
+from visuals import RESPONSE_PREFIX
 
 CONTROL_SCHEMA_VERSION = 1
 METHODOLOGY_VERSION = "real-default-v1"
@@ -70,6 +71,12 @@ def control_data(conductor: Conductor, signals: Signals, decision: Decision) -> 
     }
 
 
+def turn_text(message: dict) -> str:
+    """A saved participant turn as the conductor saw it: on-screen answers carry their marker."""
+    content = message["content"]
+    return f"{RESPONSE_PREFIX} {content}" if message.get("channel") == "visual" else content
+
+
 def replay_conductor(messages: list[dict], controls: list[dict],
                      conductor: Conductor | None = None) -> Conductor:
     """Replay one interview's durable decisions without invoking the classifier.
@@ -106,7 +113,7 @@ def replay_conductor(messages: list[dict], controls: list[dict],
             covered=tuple(data["covered"]), partial=tuple(data["partial"]),
             probe=data["probe"], ambiguous=data["ambiguous"],
         )
-        decision = conductor.turn(message["content"], signals)
+        decision = conductor.turn(turn_text(message), signals)
         if decision.action != record["decision_action"] or \
                 state_hash(conductor) != record["state_sha256"]:
             raise RecoveryError("Conductor replay diverged from its durable decision")

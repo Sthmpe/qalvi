@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from clock import InterviewClock
 from signals import Signals, Topic
-from visuals import RESPONSE_PREFIX, VISUAL_ACTION, VISUAL_ACTION_IN_WORDS, VISUAL_NAME, VISUAL_VALUE, Step
+from visuals import RESPONSE_PREFIX, VISUAL_ACTION, VISUAL_NAME, VISUAL_VALUE, Step
 
 STALL_TURNS = 3   # on-topic turns on one objective without progress before moving on
 
@@ -161,7 +161,6 @@ class Conductor:
     clock: InterviewClock
     goal: str = "how the participant currently handles a problem they care about"
     methodology: str = "real-default-v1"   # recorded with every durable control decision
-    answer_in_words: bool = False          # real rooms: visuals are reference, answers are spoken or typed
     remaining: list[Step] = field(init=False)
     learned: list[str] = field(default_factory=list)   # topic keys answered well enough to retire
     partly: list[str] = field(default_factory=list)    # topic keys touched in words, still open
@@ -218,7 +217,7 @@ class Conductor:
             "kind": VISUAL_NAME.get(kind, "something"),
             "prompt": self.on_screen.display["prompt"],
             "value": VISUAL_VALUE.get(kind, "help them answer"),
-            "action": (VISUAL_ACTION_IN_WORDS if self.answer_in_words else VISUAL_ACTION).get(kind, "answer in words."),
+            "action": VISUAL_ACTION.get(kind, "answer in words."),
             "answered": self.answered,
         }
 

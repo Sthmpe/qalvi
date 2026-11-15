@@ -39,12 +39,12 @@ from persistence import (LEASE_HELD, REAL_ROOM, EvidenceError, EvidenceWriter, S
                          SupabaseEvidenceAPI, occurred_at, persist_then_continue)
 from turn_input import handle_text_input
 from presence import check_in_allowed, inactivity_prompt, next_check_at
-from recovery import RecoveryError, control_data
+from recovery import RecoveryError, control_data, turn_text
 from reconnect import ReconnectGrace, REFRESH_GRACE_SECONDS
 from signals import Exchange, classify
 from speech import SpeechFilter
 from study import METHODOLOGY as STUDY_METHODOLOGY, StudyPlan, StudyPlanError, build_plan, study_context
-from visuals import DEMO_GOAL, DISPLAY_TOPIC, demo_steps_for_room
+from visuals import DEMO_GOAL, DISPLAY_RENDERED_TOPIC, DISPLAY_TOPIC, demo_steps_for_room
 
 load_dotenv()
 logger = logging.getLogger("qalvi.agent")
@@ -110,8 +110,7 @@ def study_conductor(plan: StudyPlan) -> Conductor:
 
     There is no per-study time budget yet; the plan alone shapes the interview.
     """
-    return Conductor(list(plan.steps), InterviewClock(None), goal=plan.goal,
-                     methodology=STUDY_METHODOLOGY, answer_in_words=True)
+    return Conductor(list(plan.steps), InterviewClock(None), goal=plan.goal, methodology=STUDY_METHODOLOGY)
 
 
 class EvidenceTracedLLM(groq.LLM):
@@ -214,7 +213,7 @@ class Interviewer(Agent):
             self._advanced_turns.add(key)
             self.mark_evidence_ack("recovered", row["sequence"])
             try:
-                guidance = await self.present(row["content"], SavedMessage(row["id"], row["sequence"], False))
+                guidance = await self.present(turn_text(row), SavedMessage(row["id"], row["sequence"], False))
             except EvidenceError:
                 await self.pause_evidence()
                 return
@@ -603,6 +602,21 @@ async def entrypoint(ctx: JobContext):
         elif event.old_state == "away":
             clock.end_exclusion("absence")
             stop_watching()
+
+    if writer:
+        async def record_render(reader, identity: str) -> None:
+            action_id = (await reader.read_all()).strip()
+            shown = conductor.on_screen.display["id"] if conductor.on_screen and conductor.on_screen.display else None
+            if identity != real_participant.identity or action_id != shown:
+                return  # only the participant, and only for the visual this agent displayed
+            try:
+                await writer.acknowledge_visual(action_id)
+            except EvidenceError:
+                logger.warning("Visual render receipt was not recorded")
+
+        ctx.room.register_text_stream_handler(
+            DISPLAY_RENDERED_TOPIC,
+            lambda reader, identity: asyncio.create_task(record_render(reader, identity)))
 
     async def on_text_input(sess: AgentSession, event: TextInputEvent) -> None:
         await handle_text_input(sess, event, agent, writer, ctx.room,

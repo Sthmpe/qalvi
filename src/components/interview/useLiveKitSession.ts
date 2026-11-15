@@ -15,6 +15,7 @@ import {
 
 /** Text stream topic the agent uses to put a predefined visual on screen. */
 export const DISPLAY_TOPIC = "qalvi.display";
+export const DISPLAY_RENDERED_TOPIC = "qalvi.display.rendered";
 const EVIDENCE_TOPIC = "qalvi.evidence";
 
 /** Agent attribute set when speech synthesis is unavailable and the interview continues in text. */
@@ -548,6 +549,8 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       setVisualReady(true);
       setDisplay(action);
       setDisplayResponse(null);
+      // A render receipt lets the saved evidence distinguish "issued" from "actually shown".
+      if (realSession) void room.localParticipant.sendText(action.id, { topic: DISPLAY_RENDERED_TOPIC }).catch(() => {});
       timing("display_received", { display: action.id, type: action.type });
     });
     if (realSession) room.registerTextStreamHandler(EVIDENCE_TOPIC, async (reader, participant) => {
@@ -701,6 +704,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
   // Typed messages and on-screen answers share one chat path, so the agent sees one conversation.
   const sendChat = useCallback(async (
     wire: string, shown: Pick<TranscriptMessage, "text" | "source">, failure: string,
+    visual?: VisualResponse,
   ) => {
     reconcileRef.current?.();
     const room = roomRef.current;
@@ -715,15 +719,14 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       timeout = setTimeout(() => reject(new Error("Send timed out")), realSession ? 45000 : 15000);
     });
     try {
-      if (realSession && shown.source === "visual") {
-        setError("Answer this one by speaking or typing. Qalvi will follow up.");
-        return false;
-      }
-      const pending = realSession ? pendingEvidence.current?.wire === wire ? pendingEvidence.current
+      // An on-screen answer is its own evidence event: it never borrows or locks the typed draft.
+      const pending = !realSession ? null
+        : visual ? { id: crypto.randomUUID(), wire, at: new Date().toISOString() }
+        : pendingEvidence.current?.wire === wire ? pendingEvidence.current
         : storedDraft.current?.text.trim() === wire
           ? { id: storedDraft.current.eventId, wire, at: storedDraft.current.at }
-          : { id: crypto.randomUUID(), wire, at: new Date().toISOString() } : null;
-      if (pending) {
+          : { id: crypto.randomUUID(), wire, at: new Date().toISOString() };
+      if (pending && !visual) {
         pendingEvidence.current = pending;
         if (initialRecovery) {
           const record = { text: wire, eventId: pending.id, at: pending.at, pending: true };
@@ -735,6 +738,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
       const info = await Promise.race([room.localParticipant.sendText(wire, {
         topic: "lk.chat", ...(pending ? { attributes: {
           "qalvi.event_id": pending.id, "qalvi.event_at": pending.at,
+          ...(visual ? { "qalvi.visual": JSON.stringify(visual) } : {}),
         } } : {}),
       }), interruption]);
       if (roomRef.current !== room) return false;
@@ -746,7 +750,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
         evidenceWaiter.current = null;
         evidenceResults.current.delete(pending.id);
         if (acknowledgement !== "saved") throw new Error("Evidence was not saved");
-        clearDraft();
+        if (!visual) clearDraft();
         await fetchRecovery().catch(() => {});
       }
       // LiveKit does not echo outgoing chat messages to their sender.
@@ -790,7 +794,7 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     if (!summary) return false;
     const sent = await sendChat(
       `${RESPONSE_PREFIX} ${summary}`, { text: summary, source: "visual" },
-      "Your answer could not be shared. Try again.",
+      "Your answer could not be shared. Try again.", response,
     );
     if (sent && generation.current === attempt) {
       answeredDisplays.current.add(action.id);
@@ -853,8 +857,5 @@ export function useLiveKitSession(tokenEndpoint = "/api/livekit-token", initialR
     readOnly: terminalInterview(recoveryStatus) || phase === "expired" || phase === "unavailable",
     error, isActive, agentReady, micEnabled, micBusy, sending,
     visualReady, voiceAvailable,
-    // Real study rooms show visuals as reference: structured on-screen answers need the
-    // atomic visual-response evidence path, so participants answer by speaking or typing.
-    answersInWords: realSession,
     audioBlocked, display, displayResponse, start, stop, reconnect, setMicrophone, sendText, respondToDisplay, enableAudio };
 }

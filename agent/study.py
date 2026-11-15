@@ -118,7 +118,7 @@ def validate_visual(objective_id: str, value) -> dict | None:
     return None
 
 
-def visual_guidance(display: dict, in_words: bool) -> str:
+def visual_guidance(display: dict) -> str:
     """How the reply model introduces a researcher's visual. Deterministic; never a script."""
     kind = VISUAL_NAME.get(display["type"], "something")
     lead = f"{kind[0].upper()}{kind[1:]} is now on the participant's screen, asking: \"{display['prompt']}\". "
@@ -126,17 +126,14 @@ def visual_guidance(display: dict, in_words: bool) -> str:
         bars = ", ".join(f"{bar['label']} {bar['value']:g}{display.get('unit', '')}" for bar in display["bars"])
         return (lead + f"It is an illustration from the researcher, not research data: {bars}. "
                 "Respond briefly to what they said, then ask in one sentence how their own experience compares.")
-    if in_words:
-        return (lead + "They can read it but answer in their own words, by saying or typing which fits and why. "
-                "Respond briefly to what they said, then invite them to look at it and tell you. "
-                "Do not read every option aloud.")
     action = {"comparison_cards": "tap the card that fits best and confirm it",
               "multiple_choice": "pick whatever applies and confirm",
               "slider": "set the slider and confirm the value"}[display["type"]]
-    return lead + f"Respond briefly to what they said, then ask them to {action}. Do not read the options aloud."
+    return (lead + f"Respond briefly to what they said, then ask them to {action}. They may also "
+            "simply answer aloud. Do not read the options aloud.")
 
 
-def build_plan(data, *, in_words: bool = True) -> StudyPlan:
+def build_plan(data) -> StudyPlan:
     """Turn the database's study plan into conductor steps. Fails closed without a usable plan."""
     if not isinstance(data, dict):
         raise StudyPlanError("Study plan is missing")
@@ -160,7 +157,7 @@ def build_plan(data, *, in_words: bool = True) -> StudyPlan:
             purpose=f"it helps the researcher understand {topic[0].lower()}{topic[1:]}",
             priority="low" if item.get("priority") == "low" else "high",
             display=display,
-            guidance=visual_guidance(display, in_words) if display else "",
+            guidance=visual_guidance(display) if display else "",
         ))
     if not steps:
         raise StudyPlanError("Study plan has no usable objectives")
