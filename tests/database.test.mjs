@@ -42,6 +42,7 @@ const TABLES = [
   "profiles", "workspaces", "workspace_members", "studies", "participants", "conversations",
   "messages", "visual_displays", "visual_responses", "findings", "finding_evidence",
   "interview_invitations", "interview_resumes", "interview_turn_controls", "interview_lifecycle_outbox",
+  "conversation_analyses",
 ];
 
 const users = {
@@ -361,7 +362,8 @@ describe("live interview persistence foundation", () => {
       "read_participant_interview_recovery", "claim_interview_invitation_with_profile",
       "reserve_interview_transport", "confirm_interview_transport",
       "rotate_interview_transport", "fail_interview_transport",
-      "report_interview_transport_connection_failure", "read_interview_study_plan"];
+      "report_interview_transport_connection_failure", "read_interview_study_plan",
+      "begin_conversation_analysis", "fail_conversation_analysis", "complete_conversation_analysis"];
     for (const name of names) {
       const routine = await one(
         `select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
@@ -671,6 +673,34 @@ describe("live interview persistence foundation", () => {
     assert.equal((await record(legacy, "real-default-v1")).id, legacy);
   });
 
+  test("a structured visual answer is a recoverable turn with its own control record", async () => {
+    const invite = await issueInvitation();
+    const room = `qalvi-real-${randomUUID()}`;
+    const conversation = await claim(invite.token, hash(), room);
+    const generation = (await pipeline(() => one(
+      "select public.claim_conversation_writer($1,$2) as n", [conversation, room]))).n;
+    const cards = { ...CARDS, id: "study-week_shape" };
+    await pipeline(() => db.query("select public.issue_interview_visual($1,$2,$3::jsonb)", [conversation, generation, JSON.stringify(cards)]));
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[])",
+      [conversation, generation, "visual:one", cards.id, 'Chose "A mix of both"', now(), ["mixed"]])), /not rendered/);
+    await pipeline(() => db.query("select public.acknowledge_interview_visual($1,$2,$3)", [conversation, generation, cards.id]));
+    const at = now();
+    const answer = await pipeline(() => one(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[])",
+      [conversation, generation, "visual:one", cards.id, 'Chose "A mix of both"', at, ["mixed"]]));
+    const row = await one("select channel, control_protocol_version from messages where id = $1", [answer.message_id]);
+    assert.deepEqual(row, { channel: "visual", control_protocol_version: 1 });
+    const signals = JSON.stringify({ intent: "continue", engagement: "neutral", covered: [], partial: [], probe: false, ambiguous: false });
+    const recorded = await pipeline(() => one(
+      "select public.record_interview_turn_control($1,$2,$3,$4::jsonb,'continue without a visual',$5,'study-plan-v1') as id",
+      [conversation, generation, answer.message_id, signals, "c".repeat(64)]));
+    assert.equal(recorded.id, answer.message_id);
+    await assert.rejects(pipeline(() => db.query(
+      "select * from public.append_interview_visual_response($1,$2,$3,$4,$5,$6,$7::text[])",
+      [conversation, generation, "visual:two", cards.id, 'Chose "Nope"', now(), ["missing"]])), /./, "an option that was not shown is refused");
+  });
+
   test("immutable controls allow authorized whole-study cleanup without allowing direct deletion", async () => {
     const study = (await pipeline(() => one(
       `insert into studies (workspace_id, title, status, research_goal, audience, objectives)
@@ -917,6 +947,71 @@ describe("study setup (Milestone 5)", () => {
     await assert.rejects(researcher("alice", () => db.query(
       "update studies set workspace_id = $2 where id = $1", [id, ids.beta])), /permission denied/);
     await assert.rejects(researcher("alice", () => db.query("delete from studies where id = $1", [id])), /permission denied/);
+  });
+});
+
+describe("interview analysis and evidence-linked AI findings", () => {
+  const begin = (conversation = ids.conversation) => pipeline(() => one(
+    "select public.begin_conversation_analysis($1) as started", [conversation]));
+  const complete = (findings, conversation = ids.conversation) => pipeline(() => one(
+    "select public.complete_conversation_analysis($1,$2,$3::jsonb,$4::jsonb,$5) as saved",
+    [conversation, "A short summary.", JSON.stringify([{ id: "week_shape", status: "covered", message_ids: [ids.spoken] }]),
+     JSON.stringify(findings), "test-model"]));
+  const finding = (extra = {}) => ({ title: "Weeks are shaped by clients", summary: "One participant said so.",
+    category: "behaviour", supports: [ids.spoken], ...extra });
+
+  test("a run is exclusive, and a failure is recorded without touching the transcript", async () => {
+    const count = async () => (await researcher("alice", () => one(
+      "select count(*)::int as n from messages where conversation_id = $1", [ids.conversation]))).n;
+    const before = await count();
+    assert.equal((await begin()).started, true);
+    assert.equal((await begin()).started, false, "a second run cannot overlap");
+    await pipeline(() => db.query("select public.fail_conversation_analysis($1,$2)", [ids.conversation, "Provider timeout"]));
+    const failed = await researcher("alice", () => one(
+      "select status, error, attempts from conversation_analyses where conversation_id = $1", [ids.conversation]));
+    assert.deepEqual(failed, { status: "failed", error: "Provider timeout", attempts: 1 });
+    assert.equal(await count(), before);
+  });
+
+  test("AI findings are proposals that must cite messages of their own conversation", async () => {
+    assert.equal((await begin()).started, true);
+    await assert.rejects(complete([finding({ supports: [] })]), /outside its conversation/);
+    await assert.rejects(complete([finding({ supports: [ids.betaMessage] })]), /outside its conversation/);
+    await assert.rejects(complete([finding({ contradicts: [ids.betaMessage] })]), /outside its conversation/);
+    assert.equal((await complete([finding({ contradicts: [ids.question] })])).saved, 1);
+    const saved = await researcher("alice", () => one(
+      `select f.origin, f.status, f.ai_metadata ->> 'conversation_id' as conversation,
+              (select count(*)::int from finding_evidence e where e.finding_id = f.id and e.relation = 'supports') as supports,
+              (select count(*)::int from finding_evidence e where e.finding_id = f.id and e.relation = 'contradicts') as contradicts
+       from findings f where f.origin = 'ai' and f.study_id = $1`, [ids.alphaStudy]));
+    assert.deepEqual(saved, { origin: "ai", status: "proposed", conversation: ids.conversation, supports: 1, contradicts: 1 });
+    const analysis = await researcher("alice", () => one(
+      "select status, summary, attempts from conversation_analyses where conversation_id = $1", [ids.conversation]));
+    assert.deepEqual(analysis, { status: "completed", summary: "A short summary.", attempts: 2 });
+    await assert.rejects(complete([finding()]), /not in progress/);
+  });
+
+  test("re-analysis replaces unreviewed proposals and keeps what the researcher reviewed", async () => {
+    await researcher("alice", () => db.query(
+      "update findings set status = 'accepted' where origin = 'ai' and study_id = $1", [ids.alphaStudy]));
+    await begin();
+    await complete([finding({ title: "Second pass" })]);
+    await begin();
+    await complete([finding({ title: "Third pass" })]);
+    const titles = (await researcher("alice", () => rows(
+      "select title from findings where origin = 'ai' and study_id = $1 order by created_at", [ids.alphaStudy]))).map((row) => row.title);
+    assert.deepEqual(titles, ["Weeks are shaped by clients", "Third pass"]);
+  });
+
+  test("analysis is private to the workspace and writable only by trusted server code", async () => {
+    assert.equal((await researcher("carol", () => rows("select conversation_id from conversation_analyses"))).length, 0);
+    await assert.rejects(researcher("alice", () => db.query(
+      "update conversation_analyses set summary = 'edited' where conversation_id = $1", [ids.conversation])), /permission denied/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "select public.begin_conversation_analysis($1)", [ids.conversation])), /permission denied/);
+    await assert.rejects(as("anon", null, () => db.query("select * from conversation_analyses")), /permission denied/);
+    await assert.rejects(researcher("alice", () => db.query(
+      "update findings set origin = 'researcher' where origin = 'ai'")), /permission denied/);
   });
 });
 

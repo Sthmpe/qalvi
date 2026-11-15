@@ -14,6 +14,59 @@ export type Database = {
   }
   public: {
     Tables: {
+      conversation_analyses: {
+        Row: {
+          attempts: number
+          completed_at: string | null
+          conversation_id: string
+          error: string | null
+          model: string | null
+          objective_coverage: Json
+          started_at: string
+          status: string
+          study_id: string
+          summary: string | null
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          attempts?: number
+          completed_at?: string | null
+          conversation_id: string
+          error?: string | null
+          model?: string | null
+          objective_coverage?: Json
+          started_at?: string
+          status: string
+          study_id: string
+          summary?: string | null
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          attempts?: number
+          completed_at?: string | null
+          conversation_id?: string
+          error?: string | null
+          model?: string | null
+          objective_coverage?: Json
+          started_at?: string
+          status?: string
+          study_id?: string
+          summary?: string | null
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "conversation_analyses_conversation_id_study_id_workspace_id_fkey"
+            columns: ["conversation_id", "study_id", "workspace_id"]
+            isOneToOne: true
+            referencedRelation: "conversations"
+            referencedColumns: ["id", "study_id", "workspace_id"]
+          },
+        ]
+      }
       conversations: {
         Row: {
           consent_version: string | null
@@ -818,6 +871,28 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      begin_conversation_analysis: {
+        Args: { p_conversation_id: string }
+        Returns: boolean
+      }
+      complete_conversation_analysis: {
+        Args: {
+          p_conversation_id: string
+          p_findings: Json
+          p_model: string
+          p_objective_coverage: Json
+          p_summary: string
+        }
+        Returns: number
+      }
+      fail_conversation_analysis: {
+        Args: { p_conversation_id: string; p_error: string }
+        Returns: undefined
+      }
+      read_interview_study_plan: {
+        Args: { p_conversation_id: string; p_writer_generation: number }
+        Returns: Json
+      }
       acknowledge_interview_visual: {
         Args: {
           p_action_id: string

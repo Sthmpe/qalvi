@@ -1,20 +1,48 @@
+import { notFound } from "next/navigation";
+import InterviewBrowser from "@/components/research/InterviewBrowser";
 import { EmptyState, SectionHeading } from "@/components/ui/primitives";
-import { studyCounts } from "@/lib/studies/queries";
+import { getInterview, listFindings, listInterviews } from "@/lib/research/results";
+import { getStudy } from "@/lib/studies/queries";
 export const metadata = { title: "Interviews" };
-export default async function InterviewsPage({ params }: { params: Promise<{ studyId: string }> }) {
-  const { conversations } = await studyCounts((await params).studyId);
+export default async function InterviewsPage({ params, searchParams }: {
+  params: Promise<{ studyId: string }>;
+  searchParams: Promise<{ conversation?: string }>;
+}) {
+  const { studyId } = await params;
+  const { conversation } = await searchParams;
+  const study = await getStudy(studyId);
+  if (!study) notFound();
+  const interviews = await listInterviews(study.id);
+  const heading = (
+    <SectionHeading
+      title="Begin with what people actually said"
+      description="Every conversation is saved as original, unedited evidence."
+    />
+  );
+  if (!interviews.length) {
+    return (
+      <>
+        {heading}
+        <EmptyState
+          title="Room for your first conversation"
+          description="Make the study active, then invite a participant from the overview. Their conversation will appear here as it happens."
+        />
+      </>
+    );
+  }
+  const selected = await getInterview(study.id, conversation ?? interviews[0].id);
+  if (!selected) notFound();
+  const cited: Record<string, { id: string; title: string }[]> = {};
+  for (const finding of await listFindings(study.id)) {
+    for (const quote of finding.evidence) {
+      (cited[quote.messageId] ??= []).push({ id: finding.id, title: finding.title });
+    }
+  }
   return (
     <>
-      <SectionHeading
-        title="Begin with what people actually said"
-        description="Every conversation is saved as original, unedited evidence."
-      />
-      <EmptyState
-        title={conversations ? `${conversations} ${conversations === 1 ? "conversation" : "conversations"} saved` : "Room for your first conversation"}
-        description={conversations
-          ? "Transcripts are stored safely in your workspace. Reading them here arrives with study results, the next milestone."
-          : "Make the study active, then invite a participant from the overview. Their conversation will be saved here as original evidence."}
-      />
+      {heading}
+      <InterviewBrowser key={selected.id} studyId={study.id} interviews={interviews} selected={selected}
+        objectives={study.objectives} cited={cited} />
     </>
   );
 }
