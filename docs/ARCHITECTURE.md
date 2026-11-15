@@ -321,6 +321,8 @@ and Supabase's default grants revoked, so a partial rollout exposes nothing.
 | `20260927000100_interview_recovery_foundation.sql` | New-protocol participant marker, immutable control decisions, scoped service-only recovery read (2B.4A) |
 | `20260929000100_livekit_profile_routing.sql` | LiveKit profile alias/generation, preparation lease, service-only pre-evidence transport rotation; applied remotely; live primary-to-backup failover accepted 2026-10-08 |
 | `20261007000100_control_cascade_cleanup.sql` | Allow derived-control deletion only when its canonical parent is already absent during authorized cleanup; applied remotely 2026-10-07 |
+| `20261008000100_writer_lease_lifecycle.sql` | Writer lease and heartbeat, recovery reservation that fences the lapsed writer, opening marker, single terminal transition with end reasons, room-ejection outbox (2B.4B); applied remotely 2026-10-08 |
+| `20261009000100_heartbeat_terminal_signal.sql` | Heartbeat reports a server-recorded ending to the current writer so the worker also ejects (2B.4B correction); applied remotely 2026-10-08 |
 
 ### LiveKit project profiles (Stage 2B.4A, accepted 2026-10-08)
 
@@ -484,6 +486,253 @@ Known limitations, deferred to Stage 2B.4B:
   aggregate routing deadline.
 - Quota-classified failover is covered by unit tests only; the live run
   exercised `assignment_timeout`.
+
+Stage 2B.4B (below) addresses the first four of these: replacement after worker
+loss, post-grace rooms, natural completion, the `in_progress` shutdown boundary
+(a lapsed lease now decides liveness, not the status), and cancellation ejection.
+Mid-interview cross-project failover, an aggregate routing deadline and live
+quota failover remain open.
+
+### Stage 2B.4B writer lease, replacement recovery and lifecycle (implemented; stage OPEN)
+
+Migrations `20261008000100_writer_lease_lifecycle.sql` and
+`20261009000100_heartbeat_terminal_signal.sql` (both applied remotely) add a server-authoritative
+writer lease to the conversation (job ID, expiry, heartbeat, transport generation),
+a recovery reservation, a durable opening marker, an end reason, and a
+`interview_lifecycle_outbox` table for provider side effects. Every new RPC is
+security definer, pins its search path and is executable by `service_role` only.
+
+**Fencing and leases.** Writes stay fenced by `writer_generation`, as in 2B.3/2B.4A.
+The lease decides when generation N+1 may exist:
+
+- `claim_interview_writer_lease` checks the current room, LiveKit profile, consent,
+  writable status and an active resume capability in one transaction. A live lease
+  held by a different LiveKit job is refused (`55P03`); the same job renews
+  idempotently; only an expired or released lease allows N+1.
+- Workers heartbeat every 10 seconds on a 30-second lease. A heartbeat from a
+  replaced job is refused, so it stops at once without writing or recording an
+  interruption. A heartbeat on a terminal conversation returns its status so the
+  worker ejects and shuts down. If a worker cannot confirm its lease for about the
+  lease length, it fences itself rather than risk two writers.
+- `reserve_interview_writer_recovery` is the takeover decision. It only succeeds for
+  a started interview whose lease has lapsed or been released, at most once per
+  90-second window and three consecutive times without a successful claim. The
+  reservation itself advances the generation, so the lapsed writer is fenced from
+  the moment takeover is decided, not only when the replacement claims.
+- The older `claim_conversation_writer` still serves already-deployed workers while
+  no lease is held and can never take a live lease.
+
+**Replacement dispatch.** `ensureInterviewWriter` (server) reserves recovery and
+dispatches one named worker into the conversation's *current* room in that room's
+*own* LiveKit project, recreating the room with the accepted retention (departure
+150 s, empty 180 s) if it has closed. A pending dispatch is reused; a running one
+(the fenced writer, about to stop) is kept but does not block a fresh dispatch; an
+ended or jobless one is replaced. An established interview never moves projects;
+a disabled or missing profile reports `unavailable`. The token route runs this
+check for every started interview, so a participant returning after grace expiry
+gets a fresh writer instead of an empty room. `POST /interview/api/recover` runs
+it when the interviewer disappears while the room stays up.
+
+**Reconstruction and crash boundaries.** A claiming worker loads canonical rows in
+database sequence and their control records, and `agent/lifecycle.py` plans the
+continuation from durable state only:
+
+| Last durable state | Meaning | Worker action |
+| --- | --- | --- |
+| Nothing saved, opening not marked | Nothing started | Mark opening durably, then greet |
+| Nothing saved, opening marked | Greeting may have been heard | No greeting; wait |
+| Participant turn without control | Crash after message ACK, before control ACK; no reply can have begun | Classify, record control, then reply once |
+| Participant turn with control | Crash after control ACK; reply may have been heard | Never regenerate; wait |
+| Assistant row | Nothing pending | Wait |
+
+Conductor state is replayed from saved controls, never reclassified. The LLM context
+is rebuilt from canonical rows. A crash before the participant message ACK leaves
+either no row (a typed draft keeps its event ID for explicit retry; lost speech
+must be repeated) or a saved row, which is the second case. Damaged history (a
+sequence gap, a controlless turn that is not the last row, legacy turns, a control
+without its message, or a decision that does not replay) ends the interview as
+`failed` with reason `recovery_integrity`; the worker never improvises around it.
+
+**Endings.** `end_interview_conversation` is the single terminal authority:
+idempotent, it sets `ended_at`, the end reason and clears the lease, and enqueues
+one room ejection in the same transaction.
+
+| Status | Set by | Reason |
+| --- | --- | --- |
+| `completed` | Participant ends (`POST /interview/api/end`) | `participant_ended` |
+| `completed` | Worker, when the conductor had closed and the participant left (grace expiry) | `interview_closed` |
+| `cancelled` | Researcher (`POST /api/research/conversations/{id}/cancel`); a participant ending a never-started interview | `researcher_cancelled` / `participant_ended` |
+| `failed` | Worker, on damaged history | `recovery_integrity` |
+| `interrupted` (not terminal) | Worker, on grace expiry without a close, or a write failure | none |
+
+Terminal sessions refuse tokens, recovery, claims and writes; the transcript stays
+readable through the resume capability until it expires. The outbox is drained at
+once by the request that ended the interview, with each row's own project
+credentials (a missing room counts as ejected), and again by
+`POST /api/internal/lifecycle-outbox` for a scheduler holding
+`QALVI_INTERNAL_TASK_SECRET` (that route does not exist without a 32+ character
+secret). Failures back off exponentially up to 10 minutes; after ten attempts a row
+is abandoned and stays for review. The worker independently ejects from its own
+project when its heartbeat reports a terminal state. A server-recorded ending
+clears the holder's job ID, so the correction migration makes the heartbeat
+report the terminal status to the current generation regardless of job ID; a
+replaced generation is only ever told it is stale and never ejects. A LiveKit JWT cannot be
+revoked, so an already-issued participant token (5-minute TTL) could still join a
+recreated, empty room; no writer can ever be claimed there.
+
+**Bounded provider calls.** The LiveKit server SDK retries other regions on
+transport errors, so one call could outlast the whole assignment window while the
+token request held its preparation lease; live acceptance hit exactly this when
+the primary region was slow. Every LiveKit server call in the router and lifecycle
+code is now bounded (12 s, never past the assignment deadline) and a call that does
+not settle is `transport_unavailable`: a pending session fails over, and a
+recovery dispatch or ejection retries in its next window.
+
+**Worker exits.** In LiveKit Agents 1.8 a job stays connected after its entrypoint
+returns until shutdown, so every early exit (lease held by another job, claim
+failure, integrity failure, paused evidence) now calls `ctx.shutdown()`; a duplicate
+or paused worker never lingers beside the real one.
+
+### Participant lifecycle contract (UI implementation)
+
+The browser never sends a conversation, room, profile, writer generation or job
+ID; every participant endpoint is scoped by the HTTP-only resume cookie and
+requires a same-origin POST (except `GET /interview/api/state`). All responses are
+`Cache-Control: no-store`. Error bodies carry a stable `code` and safe `error` text.
+
+| Endpoint | Request | Responses |
+| --- | --- | --- |
+| `GET /interview/api/state?afterSequence=N` | cursor | `200` snapshot; `401` session unavailable; `503` temporarily unavailable |
+| `POST /interview/api/token` | `{}` or `{failedTransportGeneration, failureEventId}` | `200 {serverUrl, token, roomName, identity, transportGeneration?, writer?}`; `202 {status:"preparing"}` + `Retry-After: 1`; `400`; `401`; `409` report refused; `410 {code:"session_ended"}`; `503 {code:"transport_unavailable" \| "recovery_unavailable"}`; `500 {code:"connection_error"}` |
+| `POST /interview/api/recover` | `{}` | `200 {state:"active"}`; `202 {state:"recovering"}` + `Retry-After: 2`; `409 {code:"not_started" \| "not_recoverable"}`; `410 {code:"session_ended"}`; `503 {code:"recovery_unavailable" \| "recovery_error"}`; `401`; `501 {code:"recovery_unsupported"}` (legacy single-project mode) |
+| `POST /interview/api/end` | `{}` | `200 {status, endReason}` (idempotent); `401`; `503 {code:"end_unavailable"}` |
+| `POST /api/research/conversations/{id}/cancel` | researcher session | `200 {status}` (idempotent); `401`; `404`; `503` |
+
+Snapshot fields (existing): `status`, `sessionKey`, `messages`, `nextCursor`,
+`hasMore`, `replyUnconfirmed`, `controlPending`, `legacyHistory`. Added in 2B.4B:
+`endReason`, `writerActive` (a live lease exists), `recovering` (a replacement was
+dispatched within 90 s), `openingUncertain` (greeting marked, nothing saved).
+`token.writer` is `active` or `recovering` for a started interview.
+
+Agent participant attributes: `qalvi.session.status` (`unavailable`, `interrupted`,
+`completed`, `cancelled`, `failed`); `qalvi.recovery` (`fresh`, `resumed`,
+`answering`, `reply_uncertain`); `qalvi.voice` (`unavailable`). The interviewer may
+change during a session: treat any agent-kind participant as the interviewer and
+ignore attributes from one that has left.
+
+UI states and transitions:
+
+| UI state | Enter when | Leave when |
+| --- | --- | --- |
+| connecting | Start or resume; token `202` | token `200` and room connected |
+| switching transport | a `200` token carries a higher `transportGeneration` than the last one | connected |
+| reconnecting | LiveKit `Reconnecting` | `Reconnected`, or `Disconnected` (then token again) |
+| recovering | connected, no agent participant, snapshot not terminal; call recover, poll `202` every 2 s | an agent participant joins (`200 active` alone means wait for it) |
+| interrupted | snapshot `interrupted`, no agent | the participant chooses Resume (token request dispatches a replacement) |
+| reply uncertain | `qalvi.recovery = reply_uncertain`, or `replyUnconfirmed && writerActive` | the participant sends a turn. Do not show "response delayed"; never auto-resend |
+| completed / cancelled | snapshot status, the agent attribute, or `410`/`401` after a terminal read | terminal: read-only transcript, clear drafts; copy from `endReason` |
+| failed | snapshot `failed` (`recovery_integrity`) | terminal; transcript readable |
+| session expired | `401` from state/token with no readable snapshot | terminal |
+
+Recoverable errors (retry with backoff, keep the draft): `503 transport_unavailable`,
+`recovery_error`, `end_unavailable`, `cancel_unavailable`, network failures.
+Terminal errors: `401`, `410`, and `503 recovery_unavailable` (three replacement
+attempts failed; the conversation is saved). Typed drafts keep their stable event
+IDs and explicit retry exactly as in 2B.4A.
+
+Opening expectation: a client must expect an unprompted interviewer message only
+for `qalvi.recovery = fresh` (greeting) or `answering` (reply to a recovered turn).
+For `resumed` and `reply_uncertain` nothing is said until the participant speaks.
+
+#### Participant lifecycle UI (2026-10-09; final live acceptance pending)
+
+`useLiveKitSession` consumes the lifecycle contract without changing the server,
+worker, schema or dispatch model. Connected room state is distinct from interviewer
+readiness. A replacement agent becomes current on joining; captions from the old
+interviewer are ignored. `fresh` and `answering` create an expected turn; `resumed`
+and `reply_uncertain` clear that expectation. A newly fetched canonical assistant
+row also clears waiting if its live caption was lost.
+Static worker startup attributes cannot re-expect a greeting or recovered reply
+that is already present in canonical history after a same-worker refresh.
+
+An absent interviewer triggers a canonical state check and cookie-scoped recovery.
+Recovery `202` polls every two seconds; `200 active` still waits for an agent to
+join. One polling run has a 180-second budget; each recovery HTTP request has
+a 20-second timeout. A final canonical-state read is separate. There are at most
+five consecutive temporary failures, with bounded backoff.
+Exhaustion offers explicit retry rather than another automatic polling loop.
+Interrupted interviews offer Resume. Unmount, agent arrival, network recovery,
+terminal status and obsolete room attempts abort recovery. Canonical reads are
+single-flight and guarded against stale room epochs and terminal-state reversal.
+
+Participant End Interview uses an accessible native confirmation dialog and sends
+only `{}` to the existing end endpoint. It is single-flight, never optimistic,
+and respects a concurrent researcher cancellation. Terminal status/end reason and
+session expiry have distinct copy; microphone and sending stop, saved transcript
+remains, and definitive endings/expiry clear the tab draft. Recoverable errors
+keep the stable draft event ID and require explicit retry. No browser database
+mutations or participant-selected transport/ownership IDs were added.
+
+The researcher evidence browser still contains sample records, with no real
+conversation-management action. A cancellation button was therefore not attached
+to mock IDs; the authenticated cancellation endpoint is unchanged. A real
+researcher management surface is deferred rather than expanded in this UI stage.
+
+Stage 2B.4B remains OPEN for human/device voice, voice replacement and backup
+replacement acceptance. Controlled browser UI checks are not LiveKit acceptance.
+
+Demo dispatch (2026-10-09): the public demo joins the legacy singleton project.
+When that project is also a configured named profile, `/api/livekit-token` asks for
+that profile's named worker in the `qalvi-demo-*` room (`dispatchDemoWorker`,
+bounded, once per room) because automatic dispatch has no unnamed worker to reach.
+Without a matching named profile the legacy automatic dispatch is unchanged. The
+demo stays separate from real interviews: no conversation, writer or evidence.
+
+Outbox drain note: the inline drain after an ending leases the five oldest due
+rows. Without a running scheduler, rows from worker-recorded endings accumulate,
+and an ending's own row can fall outside that batch; its room is then ejected by
+the worker heartbeat and the row waits for the scheduler. A deployed scheduler
+calling `/api/internal/lifecycle-outbox` is required in production.
+
+### Stage 2B.4B live acceptance (2026-10-08, automated, real LiveKit Cloud)
+
+Primary `6UsqFczaqMPv` and backup `8su99bUN5iL3` ran the 2B.4B worker. A headless
+Chrome participant used the real invitation, consent, session page, token and
+recover routes with typed turns; crash boundaries were created through the
+service-role database as a crashed worker would leave them (a lapsed lease held by
+a different job ID; a saved turn without its control; a saved turn and control
+without a reply). One continuous session passed all 18 checks: lease claimed by the
+job, opening marker before the greeting, heartbeat extension, refresh within grace
+without takeover, boundary-4 replacement (generation 3, no unprompted output, same
+sequence), immediate fencing of the lapsed writer, boundary 2 answered exactly
+once (generation 5), boundary 3 never regenerated (generation 7) with
+`replyUnconfirmed`/`writerActive` reported, researcher cancellation with
+`ended_at` and reason, ejection of the room in its own project within a second,
+and terminal refusal of token, recovery and claims. Participant end passed 3/3.
+With the server's inline ejection deliberately undrained, the worker's heartbeat
+ejected the room in 9.5 s and the scheduler route then completed the outbox row.
+A session left for the 120-second grace was marked `interrupted` with its lease
+released; reopening it dispatched a replacement that resumed without re-greeting.
+Every fixture room had already been removed by ejection or retention before cleanup.
+
+Not covered: a human microphone and real device, a voice-turn replacement (all
+live turns were typed), a replacement inside the backup project, and the browser
+handling of the new states (the current client shows "response delayed" after a
+`resumed` recovery; see the contract above).
+
+Integrated UI live acceptance (2026-10-09, `stage-2b4b-integration`): the real
+participant UI against real LiveKit Cloud passed lifecycle 13/13
+(`9f5b573e-40e6-46a1-8aba-a0e9d73fb762`), researcher cancellation 2/2
+(`0bc3519f-2d4f-4369-ae88-efe6962574bf`), expiry 2/2
+(`93b857c5-d438-470b-af02-2c52f6a4eaef`), damaged history to `failed` 2/2 in six of
+seven runs (for example `cd50a405-b7ed-41d2-9bf5-3d69e5fd9df4`), and a replacement
+inside the backup project (`de90ab9f-c6f2-4980-bb24-2615acfdad35`, generation 1 to
+3, same room, no second greeting, ended and ejected). In the remaining failed-path
+run (`8f93dab6-1b43-40d9-bfb5-18398473d3c7`) worker logs show the fenced worker
+exiting at once, yet the browser made no recovery request. The first backup-routed
+session after scale-to-zero (`8e1c0da3-8f5c-40e7-b8f6-26cd58380ab2`) received a job
+in 17 s but the participant never joined. Both remain open observations. Typed
+turns and service-role crash injection are not human or voice acceptance.
 
 ```
 auth.users 1-1 profiles

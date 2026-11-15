@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from clock import InterviewClock
 from conductor import Conductor
+from lifecycle import plan_recovery
 from persistence import EvidenceError, EvidenceWriter
 from recovery import RecoveryError, control_data, replay_conductor
 from signals import Signals
@@ -136,6 +137,25 @@ class StudyConductorTests(unittest.TestCase):
                   "state_sha256": control["state_sha256"]}
         with self.assertRaises(RecoveryError):
             replay_conductor([message], [record])
+
+    def test_a_replacement_worker_replays_a_study_interview_from_its_saved_plan(self):
+        plan = build_plan(saved_plan())
+        live = study_conductor(plan)
+        turns = [("We moved off spreadsheets.", ENGAGED),
+                 ("It broke at month-end.", Signals(intent="continue", engagement="engaged", covered=("last_switch",)))]
+        messages, controls = [], []
+        for sequence, (text, signals) in enumerate(turns):
+            control = control_data(live, signals, live.turn(text, signals))
+            messages.append({"id": f"m{sequence}", "sequence": sequence, "speaker": "participant",
+                             "content": text, "control_protocol_version": 1})
+            controls.append({"message_id": f"m{sequence}", **control})
+        recovered = plan_recovery(messages, controls, True, study_conductor(plan)).conductor
+        self.assertEqual(recovered.on_screen.key, "choice")
+        self.assertEqual(recovered.learned, ["last_switch"])
+        self.assertEqual(recovered.methodology, "study-plan-v1")
+        edited = build_plan(saved_plan(objectives=saved_plan()["objectives"][1:]))
+        with self.assertRaises(RecoveryError):
+            plan_recovery(messages, controls, True, study_conductor(edited))
 
 
 class StudyPersistenceTests(unittest.IsolatedAsyncioTestCase):

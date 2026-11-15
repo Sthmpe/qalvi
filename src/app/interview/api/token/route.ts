@@ -5,6 +5,7 @@ import { RESUME_COOKIE, readParticipantTransport, resolveParticipant, sameOrigin
 import { assignmentTimeoutMs, loadLiveKitProfiles, type LiveKitProfile } from "@/lib/interview/livekitProfiles";
 import { LiveKitProviderFailure } from "@/lib/interview/livekitFailures";
 import { routeLiveKitTransport, type TransportState, type TransportStore } from "@/lib/interview/livekitRouter";
+import { ensureInterviewWriter, type WriterState } from "@/lib/interview/lifecycle";
 
 export const maxDuration = 150;
 
@@ -48,7 +49,7 @@ function storeFor(conversationId: string): TransportStore {
 }
 
 async function participantToken(profile: LiveKitProfile, room: string, participantId: string,
-  writerGeneration: number, transportGeneration?: number) {
+  writerGeneration: number, transportGeneration?: number, writer?: WriterState) {
   const identity = `participant-${participantId}`;
   const token = new AccessToken(profile.apiKey, profile.apiSecret, {
     identity, ttl: "5m",
@@ -60,7 +61,8 @@ async function participantToken(profile: LiveKitProfile, room: string, participa
     canSubscribe: true, canUpdateOwnMetadata: false,
   });
   const response = NextResponse.json({ serverUrl: profile.serverUrl, token: await token.toJwt(),
-    roomName: room, identity, ...(transportGeneration ? { transportGeneration } : {}) });
+    roomName: room, identity, ...(transportGeneration ? { transportGeneration } : {}),
+    ...(writer ? { writer } : {}) });
   response.headers.set("Cache-Control", "no-store");
   response.headers.set("Referrer-Policy", "no-referrer");
   return response;
@@ -116,8 +118,22 @@ export async function POST(request: NextRequest) {
       response.headers.set("Retry-After", "1");
       return response;
     }
+    // A started interview needs a live writer. A lapsed or released lease (worker
+    // lost, or reconnect grace expired) dispatches one fenced replacement into the
+    // same room and project; the participant rejoins while it reconstructs.
+    let writer: WriterState | undefined;
+    if (routed.state.writer_generation > 0) {
+      writer = await ensureInterviewWriter(session.id, { profiles });
+      if (writer === "terminal") {
+        return NextResponse.json({ code: "session_ended", error: "This interview has ended." }, { status: 410 });
+      }
+      if (writer === "exhausted") {
+        return NextResponse.json({ code: "recovery_unavailable",
+          error: "The interviewer could not be restored. Your conversation is saved." }, { status: 503 });
+      }
+    }
     return participantToken(routed.profile, routed.state.livekit_room, session.participant_id,
-      routed.state.writer_generation, routed.state.transport_generation);
+      routed.state.writer_generation, routed.state.transport_generation, writer);
   } catch (error) {
     const unavailable = error instanceof LiveKitProviderFailure;
     return NextResponse.json({ code: unavailable ? "transport_unavailable" : "connection_error", error: unavailable

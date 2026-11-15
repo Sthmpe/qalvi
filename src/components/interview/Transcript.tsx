@@ -4,9 +4,10 @@ import type { TranscriptMessage } from "./types";
 interface TranscriptProps {
   messages: TranscriptMessage[];
   provisional?: TranscriptMessage | null;
+  ended?: boolean;
 }
 
-export default function Transcript({ messages, provisional }: TranscriptProps) {
+export default function Transcript({ messages, provisional, ended }: TranscriptProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
 
@@ -21,8 +22,8 @@ export default function Transcript({ messages, provisional }: TranscriptProps) {
     return (
       <div className="transcript-empty">
         <span aria-hidden="true">“</span>
-        <p>Qalvi will begin the conversation.</p>
-        <small>Your words and Qalvi&apos;s questions will appear here.</small>
+        <p>{ended ? "No saved messages in this interview." : "Qalvi will begin the conversation."}</p>
+        <small>{ended ? "This interview is read-only." : "Your words and Qalvi's questions will appear here."}</small>
       </div>
     );
   }

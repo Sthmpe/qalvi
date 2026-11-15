@@ -10,10 +10,14 @@ REFRESH_GRACE_SECONDS = 120.0
 
 class ReconnectGrace:
     def __init__(self, identity: str, expire: Callable[[], Awaitable[None]],
-                 seconds: float = REFRESH_GRACE_SECONDS):
+                 seconds: float = REFRESH_GRACE_SECONDS,
+                 present: Callable[[], bool] | None = None):
         self.identity = identity
         self._expire = expire
         self._seconds = seconds
+        # Authoritative room membership at expiry. Event order alone is not
+        # trusted: a participant who is in the room is never timed out.
+        self._present = present
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -34,6 +38,9 @@ class ReconnectGrace:
 
     async def _wait(self) -> None:
         await asyncio.sleep(self._seconds)
+        if self._present is not None and self._present():
+            self._task = None
+            return
         self._closed = True
         await self._expire()
 

@@ -645,6 +645,158 @@ Stage 2B.4A is CLOSED. Stage 2B.4B (replacement worker after worker loss,
 post-grace orphan rooms, natural completion status, the `in_progress` shutdown
 boundary, cancellation ejection) has not started.
 
+## 2026-10-08 — Stage 2B.4B: writer lease, replacement recovery and interview endings
+
+Stage 2B.4A was integrated into master by fast-forward (`136b214..1357341`, no
+force, no history rewrite; the corrupt `.git/ORIG_HEAD` was avoided by updating
+refs with push and fetch rather than repaired). Stage 2B.4B is developed on
+`stage-2b4b-lifecycle`.
+
+Decision: liveness is a server-clock lease, fencing stays the generation. A
+worker claims a 30-second lease for its LiveKit job and renews it every 10
+seconds. Another job can never take a live lease. A lapsed or released lease lets
+the server reserve one takeover per 90-second window (three consecutive attempts
+at most); the reservation itself advances the generation, so a lapsed writer that
+wakes up cannot write between the decision and the replacement's claim. Older
+deployed workers keep using the previous claim while no lease is held and can
+never take a live one.
+
+Decision: a replacement continues only from durable state. It replays saved
+controls (no reclassification) and rebuilds model context from canonical rows.
+The control record is the gate before any reply, so a saved participant turn
+without a control is classified and answered once; a turn with a control may have
+been answered aloud and is never regenerated. The greeting gets the same rule
+through a durable opening marker written before it is generated. Damaged history
+ends the interview as `failed` (`recovery_integrity`) rather than improvising.
+
+Decision: one idempotent terminal authority. `end_interview_conversation` sets
+`ended_at`, an end reason, clears the lease and enqueues room ejection in one
+transaction. Participant end and natural close are `completed`; researcher
+cancellation (and ending a never-started interview) is `cancelled`. Ejection runs
+through a durable outbox with backoff (abandoned after ten attempts, retained for
+review) using each room's own project credentials, and independently through the
+worker's own heartbeat. A scheduler must call `/api/internal/lifecycle-outbox`
+with `QALVI_INTERNAL_TASK_SECRET` in deployment; requests that end an interview
+also drain it at once. LiveKit tokens cannot be revoked; the 5-minute TTL bounds
+an already-issued token, and no writer can be claimed for a terminal session.
+
+Live acceptance found two defects, both fixed before the recorded runs: the
+heartbeat answered a server-recorded ending with "stale" (the ending had cleared
+the job ID), so the worker never ejected on its own; forward migration
+`20261009000100` reports the terminal status to the current generation. And the
+LiveKit server SDK's region failover let one API call outlast the assignment
+window while a token request held its preparation lease; every LiveKit call is
+now bounded and a timeout is a failover-eligible provider failure. A worker that
+returns from its entrypoint keeps its job connected in LiveKit Agents 1.8, so every
+early exit now shuts the job down.
+
+Automated live acceptance on primary `6UsqFczaqMPv` (backup `8su99bUN5iL3`
+deployed identically), typed turns in headless Chrome, crash boundaries created
+through the service role: conversation `10f6b13d-fc40-42cd-b7b4-f8e8fb24af78`
+(participant `a51b79e9-5967-4018-898a-892d2be7ecd1`) passed 18/18 through writer
+generation 7 with 8 canonical rows and 4 controls, then researcher cancellation
+ejected its room within a second. `157ad0b5-cfb4-44de-aacf-2e33443e91ac` passed
+participant end. `914c6a6e-c1a0-43ae-a08b-2ef7b907684b` passed worker-side ejection
+in 9.5 s with the outbox drained afterwards by the scheduler route. A session
+left past its grace was `interrupted` with the lease released and resumed by a
+replacement without re-greeting. The disposable researcher, workspace, study,
+conversations and rooms were removed; all checked table counts returned to
+baseline.
+
+Not done: human microphone/device acceptance, a voice-turn replacement, a
+replacement inside the backup project, and the browser UI for the new states
+(Codex; contract in ARCHITECTURE). Stage 2B.4B is OPEN.
+
+## 2026-10-09 — Stage 2B.4B participant lifecycle UI
+
+Use the accepted backend at `f522ea1` on a separate `stage-2b4b-ui` branch.
+No agent, migration, privileged client, API, provider or dispatch changes.
+Room connectivity alone does not mean Qalvi is ready: bounded recovery polls
+the existing endpoint, and waits for an actual agent. A new agent replaces the
+current interviewer, including a brief overlap with the old participant.
+`resumed` and `reply_uncertain` never expect a greeting or manufacture a delayed
+reply. Canonical assistant rows can settle a pending turn when transport captions
+were missed. Typed evidence remains acknowledged through the existing stable ID
+path; nothing is automatically resent.
+
+Participant end is confirmed in an accessible native dialog, single-flight and
+server-authoritative. Distinct terminal/end-reason and expiry states retain loaded
+evidence and stop microphone/submission/recovery loops. Ending or expiry clears
+drafts; temporary failures preserve them. Escape focus restoration was corrected
+after a headless Chrome check; successful ending focuses the terminal notice.
+
+The researcher UI has no real conversation action yet; sample IDs cannot safely
+be sent to researcher cancellation. Defer that surface and keep the existing
+authenticated cancellation API. Stage 2B.4B remains OPEN pending real human/device,
+voice-replacement and backup-project replacement checks. No Stage 2B.5 work.
+
+UI validation: 148 Node tests passed, including database/RLS tests. Headless
+Chrome passed 26 lifecycle checks against the real React components with mocked
+transport/API events, plus 10 production-page smoke assertions for the demo and
+visual gallery. All four widths (320, 390, 768 and 1440px) had no overflow.
+These checks do not establish real Cloud voice or human microphone acceptance.
+
+Final TypeScript and production build passed. Credential scanning covered 183
+source/client files with zero exact-value matches; git diff --check was clean.
+Final full-project lint passed without errors or warnings.
+
+Handoff (2026-10-09): the participant lifecycle UI is accepted as implementation-
+complete and ready for final live acceptance. The checkpoint stays on
+stage-2b4b-ui; Stage 2B.4B remains OPEN and master is not merged. Focused
+interview, recovery and visual regressions passed again: 56/56. No application
+code changed after the full TypeScript, lint and production-build validation.
+
+## 2026-10-09 — Stage 2B.4B integration and final live acceptance
+
+Integrate on `stage-2b4b-integration` from `1b8a575` (UI on the `f522ea1` backend);
+neither source branch was rewritten. The UI matches the backend contract, so no
+lifecycle semantics changed.
+
+Decision: restore the public demo by named dispatch instead of deploying an unnamed
+worker. 2B.4A forbids unnamed workers in profile projects (they would join every
+interview room), which left the demo, still on automatic dispatch, without an
+interviewer. The demo token route now requests the named worker of the profile
+whose URL matches the legacy project, once per room. Real interviews are unaffected.
+
+Decision: Stage 2B.4B stays OPEN. Live real-browser acceptance passed for the
+lifecycle, cancellation, expiry, damaged history and a backup-project replacement,
+but human microphone acceptance and a spoken-turn replacement need a person, and
+the outbox scheduler needs a deployment that does not exist. No scheduler was
+configured against a local machine and called deployment.
+
+Recorded observations: one failed-path run in seven where the browser never
+requested recovery after the fenced worker left; one cold-start backup session that
+never joined although a job was assigned; and the inline drain serving the oldest
+five rows first, so an ending's own row can wait behind a backlog (the worker
+heartbeat still ejects its room). Harness assertions corrected during the run: the
+mid-session microphone failure uses its own wording, ejection is awaited rather
+than sampled, and LiveKit does not list a finished dispatch.
+
+## 2026-10-10 — Stage 2B.4B first human microphone session
+
+The first human session (`c6a9f3e9-24a4-4789-8265-548caa12877b`) does not pass
+human-device acceptance. Voice capture, transcription, control-before-reply
+ordering, spoken replies and the ending all worked, but the participant's microphone
+captured Qalvi's playback and five echoes of Qalvi's speech were saved as
+participant messages and classified. Raw evidence attributed to the wrong speaker
+is an evidence-integrity failure, so this is a blocker, not a tuning note. No
+refresh happened and the crash injector's window had expired, so neither refresh
+nor spoken-turn replacement was tested.
+
+Proposed, not implemented (needs approval because it changes the voice pipeline or
+adds a dependency): enable LiveKit Cloud enhanced noise cancellation on the agent's
+audio input, and/or hold participant audio while Qalvi is speaking unless the
+participant clearly interrupts. A repeat session should use headphones first to
+separate device echo from a pipeline defect. Stage 2B.4B remains OPEN.
+
+Participant confirmation (2026-10-10): the session ran in the VS Code built-in
+browser on laptop speakers; the participant spoke during the silent gap and did
+not refresh. An editor webview is not a supported participant browser, so the
+missed speech and the echo are not yet attributed to Qalvi. The repeat runs in
+desktop Chrome or Edge, first with headphones, then once on speakers to test the
+browser's echo cancellation; the echo fix is adopted only if Chrome on speakers
+still saves Qalvi's speech as participant evidence.
+
 ## 2026-11-10 — Defer Stage 2B.4B; start Milestone 5
 
 Decision (user): Milestone 4 Stage 2B.4B is deferred. Milestone 5, the Generic

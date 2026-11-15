@@ -1,5 +1,5 @@
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "failed";
-export type InterviewStatus = "idle" | "connecting" | "reconnecting" | "disconnected" | "failed" | "ready" | "waiting" | "delayed" | "listening" | "thinking" | "speaking";
+export type InterviewStatus = "idle" | "connecting" | "reconnecting" | "disconnected" | "failed" | "ready" | "waiting" | "delayed" | "listening" | "thinking" | "speaking" | "switching" | "recovering" | "interrupted" | "completed" | "cancelled" | "expired" | "unavailable";
 
 export type InputMode = "voice" | "text";
 

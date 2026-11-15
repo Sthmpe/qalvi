@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 
 from dotenv import load_dotenv
 
@@ -32,12 +33,13 @@ from clock import InterviewClock, TimeBudget
 from conductor import Conductor
 from failures import chat_item, from_error_event, signaling_failure
 from latency import install_latency_logging
+from lifecycle import LEASE_SECONDS, RecoveryPlan, WriterHeartbeat, plan_recovery
 from opening import OpeningTurn
-from persistence import (REAL_ROOM, EvidenceError, EvidenceWriter,
+from persistence import (LEASE_HELD, REAL_ROOM, EvidenceError, EvidenceWriter, SavedMessage,
                          SupabaseEvidenceAPI, occurred_at, persist_then_continue)
 from turn_input import handle_text_input
 from presence import check_in_allowed, inactivity_prompt, next_check_at
-from recovery import control_data
+from recovery import RecoveryError, control_data
 from reconnect import ReconnectGrace, REFRESH_GRACE_SECONDS
 from signals import Exchange, classify
 from speech import SpeechFilter
@@ -50,6 +52,8 @@ logger = logging.getLogger("qalvi.agent")
 DEMO_BUDGET = TimeBudget(max_duration=10 * 60)
 USER_AWAY_TIMEOUT = 15.0  # framework default, made explicit because idle time is measured from it
 VOICE_ATTRIBUTE = "qalvi.voice"  # the browser reads this to explain a silent interviewer
+STATUS_ATTRIBUTE = "qalvi.session.status"  # unavailable | interrupted | completed | cancelled | failed
+RECOVERY_ATTRIBUTE = "qalvi.recovery"  # fresh | resumed | answering | reply_uncertain
 
 PERSONA = "You are Qalvi, a calm, attentive, and neutral research interviewer. "
 DEMO_OPENING = (
@@ -101,6 +105,15 @@ def study_instructions(plan: StudyPlan) -> str:
     return PERSONA + STUDY_OPENING + CONDUCT + " " + study_context(plan)
 
 
+def study_conductor(plan: StudyPlan) -> Conductor:
+    """The starting conductor for a study interview. Replay and live turns both begin here.
+
+    There is no per-study time budget yet; the plan alone shapes the interview.
+    """
+    return Conductor(list(plan.steps), InterviewClock(None), goal=plan.goal,
+                     methodology=STUDY_METHODOLOGY, answer_in_words=True)
+
+
 class EvidenceTracedLLM(groq.LLM):
     """Timing-only trace at the actual model chat invocation for live acceptance."""
 
@@ -115,12 +128,24 @@ class EvidenceTracedLLM(groq.LLM):
         return super().chat(*args, **kwargs)
 
 
+def history_context(history: list[dict]) -> llm.ChatContext:
+    """The model's context rebuilt from canonical rows only, in database sequence."""
+    context = llm.ChatContext.empty()
+    for row in history:
+        content = row["content"] if row["channel"] != "visual" else "[On screen] " + row["content"]
+        context.add_message(role="user" if row["speaker"] == "participant" else "assistant",
+                            content=content, id="canonical-" + row["id"],
+                            interrupted=bool(row.get("interrupted")))
+    return context
+
+
 class Interviewer(Agent):
     def __init__(self, room: rtc.Room, conductor: Conductor, classifier,
                  writer: EvidenceWriter | None = None,
                  traced_llm: EvidenceTracedLLM | None = None,
+                 chat_ctx: llm.ChatContext | None = None,
                  instructions: str = INSTRUCTIONS) -> None:
-        super().__init__(instructions=instructions)
+        super().__init__(instructions=instructions, **({"chat_ctx": chat_ctx} if chat_ctx else {}))
         self._room = room
         self._conductor = conductor
         self._classifier = classifier
@@ -130,6 +155,7 @@ class Interviewer(Agent):
         self._paused = False
         self._advanced_turns: set[str] = set()
         self._turn_lock = asyncio.Lock()  # voice and typed callbacks share canonical control order
+        self.on_paused: Callable[[], None] | None = None  # set by the entrypoint for real interviews
         self._assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = None
 
     def mark_evidence_ack(self, kind: str, sequence: int) -> None:
@@ -157,6 +183,43 @@ class Interviewer(Agent):
             logger.warning("Could not publish interview interruption state to the room")
         if self._writer:
             await self._writer.interrupt()
+        if self.on_paused:
+            # The interruption released the lease, so a replacement may now be
+            # dispatched. Leave the room rather than linger as a second agent.
+            self.on_paused()
+
+    def fence(self) -> None:
+        """This writer was replaced or its lease is unconfirmed: never write again.
+
+        Unlike pause_evidence, it does not publish or record an interruption: the
+        conversation may already be continuing under a replacement writer.
+        """
+        self._paused = True
+
+    def restore(self, plan: RecoveryPlan) -> None:
+        """Adopt canonical history: remembered context, and turns already advanced."""
+        for row in plan.history:
+            if plan.pending is not None and row["id"] == plan.pending["id"]:
+                continue  # present() remembers it when the pending turn is answered
+            self.remember("participant" if row["speaker"] == "participant" else "qalvi", row["content"])
+            if row["speaker"] == "participant":
+                self._advanced_turns.add(row["transport_segment_id"])
+
+    async def answer_pending(self, row: dict, session: AgentSession) -> None:
+        """Crash boundary 2: the saved turn has no control, so no reply can have begun."""
+        key = row["transport_segment_id"]
+        async with self._turn_lock:
+            if self._paused or key in self._advanced_turns:
+                return
+            self._advanced_turns.add(key)
+            self.mark_evidence_ack("recovered", row["sequence"])
+            try:
+                guidance = await self.present(row["content"], SavedMessage(row["id"], row["sequence"], False))
+            except EvidenceError:
+                await self.pause_evidence()
+                return
+        # The turn is already the last user message in the rebuilt context.
+        session.generate_reply(instructions=guidance) if guidance else session.generate_reply()
 
     def remember(self, role: str, text: str) -> None:
         if text:
@@ -269,28 +332,62 @@ async def entrypoint(ctx: JobContext):
     evidence_api: SupabaseEvidenceAPI | None = None
     writer: EvidenceWriter | None = None
     real_participant = None
-    plan: StudyPlan | None = None
+    plan: RecoveryPlan | None = None
+    study: StudyPlan | None = None
     if real:
         try:
             evidence_api = SupabaseEvidenceAPI.from_env()
             real_participant = await ctx.wait_for_participant()
-            writer = await EvidenceWriter.claim(evidence_api, ctx.room.name, real_participant.identity)
+            writer = await EvidenceWriter.claim(evidence_api, ctx.room.name, real_participant.identity,
+                                                ctx.job.id, LEASE_SECONDS)
             # A real interview follows its own saved study, or does not start at all.
-            plan = build_plan(await writer.read_study_plan())
-        except (EvidenceError, StudyPlanError) as exc:
-            logger.error("Real interview could not start: %s",
-                         "study plan unavailable" if isinstance(exc, StudyPlanError) or writer else
-                         "evidence writer unavailable")
+            study = build_plan(await writer.read_study_plan())
+            messages, controls = await writer.load_history()
+            plan = plan_recovery(messages, controls, writer.opening_started, study_conductor(study))
+        except StudyPlanError:
+            logger.error("Real interview could not start: study plan unavailable")
+            await writer.release()
             if ctx.room.isconnected():
-                await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
-            if writer:
-                await writer.interrupt()
+                await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: "unavailable"})
+            await evidence_api.close()
+            ctx.shutdown(reason="Interview study plan unavailable")
+            return
+        except EvidenceError as exc:
+            if exc.code == LEASE_HELD:
+                # Another live worker owns this interview. Leave without touching it.
+                logger.info("[qalvi recovery] phase=lease_held action=exit")
+            else:
+                logger.error("Real interview could not acquire its evidence writer")
+                if writer:
+                    await writer.release()
+                elif ctx.room.isconnected():
+                    await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: "unavailable"})
             if evidence_api:
                 await evidence_api.close()
+            # An entrypoint that returns keeps its job connected until shutdown.
+            ctx.shutdown(reason="Interview writer unavailable")
             return
+        except RecoveryError as exc:
+            # Stored evidence cannot support a safe continuation. Never improvise
+            # around it: end the interview as failed and eject the participant.
+            logger.error("[qalvi recovery] phase=integrity_failure reason=%s", exc)
+            status = "failed"
+            try:
+                status = await writer.end("failed", "recovery_integrity")
+            except EvidenceError:
+                logger.error("[qalvi recovery] phase=integrity_failure_unrecorded")
+            if ctx.room.isconnected():
+                await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: status})
+            await ctx.delete_room()
+            if evidence_api:
+                await evidence_api.close()
+            ctx.shutdown(reason="Interview evidence integrity failure")
+            return
+        logger.info("[qalvi recovery] phase=writer_claimed generation=%d rows=%d plan=%s",
+                    writer.generation, len(plan.history), plan.signal)
         logger.info("[qalvi study] study=%s setup=%s objectives=%d visuals=%d assumptions=%d",
-                    plan.study_id, plan.fingerprint, len(plan.steps),
-                    sum(1 for step in plan.steps if step.display), len(plan.assumptions))
+                    study.study_id, study.fingerprint, len(study.steps),
+                    sum(1 for step in study.steps if step.display), len(study.assumptions))
     stt = groq.STT(model="whisper-large-v3-turbo")
     llm_model = (EvidenceTracedLLM if real else groq.LLM)(model="openai/gpt-oss-120b")
     classifier = groq.LLM(model="openai/gpt-oss-120b", reasoning_effort="low", max_completion_tokens=300)
@@ -301,18 +398,22 @@ async def entrypoint(ctx: JobContext):
                               if real else {}))
     install_latency_logging(session, room_name=ctx.room.name, stt=stt, llm=llm_model, tts=tts)
 
-    if plan:
-        # No per-study time budget yet (ROADMAP exclusion); the plan alone shapes the interview.
-        clock = InterviewClock(None)
-        conductor = Conductor(list(plan.steps), clock, goal=plan.goal,
-                              methodology=STUDY_METHODOLOGY, answer_in_words=True)
+    steps = demo_steps_for_room(ctx.room.name)
+    if plan is not None:
+        # Real rooms: replayed from durable controls, never reclassified. A fresh
+        # interview replays nothing and equals a newly constructed conductor.
+        conductor = plan.conductor
+        clock = conductor.clock
     else:
-        steps = demo_steps_for_room(ctx.room.name)
         clock = InterviewClock(DEMO_BUDGET if steps else None)
         conductor = Conductor(steps, clock, goal=DEMO_GOAL) if steps else Conductor(steps, clock)
     agent = Interviewer(ctx.room, conductor, classifier, writer,
                         llm_model if isinstance(llm_model, EvidenceTracedLLM) else None,
-                        instructions=study_instructions(plan) if plan else INSTRUCTIONS)
+                        history_context(plan.history) if plan and plan.history else None,
+                        instructions=study_instructions(study) if study else INSTRUCTIONS)
+    if plan is not None:
+        agent.restore(plan)
+        agent.on_paused = lambda: ctx.shutdown(reason="Interview evidence paused")
     opening = OpeningTurn()
     presence = {"nudges": 0, "task": None}
     assistant_queue: asyncio.Queue[tuple[llm.ChatMessage, str]] | None = asyncio.Queue() if writer else None
@@ -336,6 +437,8 @@ async def entrypoint(ctx: JobContext):
 
     assistant_task = asyncio.create_task(save_assistant_items()) if writer else None
 
+    heartbeat: dict = {"task": None}
+
     async def close_evidence() -> None:
         if assistant_queue:
             try:
@@ -344,14 +447,53 @@ async def entrypoint(ctx: JobContext):
                 logger.error("Assistant evidence queue did not drain before shutdown")
         if assistant_task:
             assistant_task.cancel()
+        if heartbeat["task"] and heartbeat["task"] is not asyncio.current_task():
+            heartbeat["task"].cancel()
+        if writer:
+            await writer.release()  # lets a replacement claim at once instead of waiting for expiry
         if evidence_api:
             await evidence_api.close()
 
     if writer:
         ctx.add_shutdown_callback(close_evidence)
 
+    async def writer_lost(reason: str) -> None:
+        # Replaced, released, or unable to confirm the lease: stop writing now and
+        # leave the room to the replacement. Do not record an interruption.
+        logger.warning("[qalvi recovery] phase=writer_lost reason=%s", reason)
+        agent.fence()
+        try:
+            await session.aclose()
+        finally:
+            ctx.shutdown(reason="Writer lease lost")
+
+    async def conversation_ended(status: str) -> None:
+        # Cancelled or ended elsewhere: eject the participant from this worker's own
+        # LiveKit project (the server outbox does the same with its credentials).
+        logger.info("[qalvi recovery] phase=terminal status=%s action=eject", status)
+        agent.fence()
+        try:
+            await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: status})
+        except Exception:
+            logger.warning("Could not publish the interview ending to the room")
+        try:
+            await ctx.delete_room()
+        finally:
+            try:
+                await session.aclose()
+            finally:
+                ctx.shutdown(reason=f"Interview {status}")
+
     async def expire_refresh_grace() -> None:
         try:
+            if writer and conductor.closed:
+                # The conversation closed naturally and the participant left: complete it.
+                status = await writer.end("completed", "interview_closed")
+                agent.fence()
+                await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: status})
+            else:
+                await agent.pause_evidence()
+        except EvidenceError:
             await agent.pause_evidence()
         finally:
             try:
@@ -359,8 +501,10 @@ async def entrypoint(ctx: JobContext):
             finally:
                 ctx.shutdown(reason="Participant refresh grace expired")
 
-    reconnect_grace = ReconnectGrace(real_participant.identity, expire_refresh_grace) \
-        if real_participant else None
+    reconnect_grace = ReconnectGrace(
+        real_participant.identity, expire_refresh_grace,
+        present=lambda: real_participant.identity in ctx.room.remote_participants,
+    ) if real_participant else None
     if reconnect_grace:
         ctx.add_shutdown_callback(reconnect_grace.close)
 
@@ -474,14 +618,30 @@ async def entrypoint(ctx: JobContext):
     if real:
         logger.info("[qalvi recovery] phase=session_started close_on_disconnect=false grace_seconds=%d recording_enabled=%s",
                     REFRESH_GRACE_SECONDS, any(session._opts.recording_options.values()))
+    if writer and plan is not None:
+        heartbeat["task"] = asyncio.create_task(WriterHeartbeat(
+            lambda: writer.heartbeat(LEASE_SECONDS), writer_lost, conversation_ended).run())
+        await ctx.wait_for_participant(identity=real_participant.identity)
+        await ctx.room.local_participant.set_attributes({RECOVERY_ATTRIBUTE: plan.signal})
+        if plan.greet:
+            try:
+                await writer.mark_opening()  # durable BEFORE the greeting may be heard
+            except EvidenceError:
+                await agent.pause_evidence()
+                return
+            await opening.start(session, lambda: ctx.wait_for_participant(identity=real_participant.identity),
+                                fresh=True)
+        elif plan.pending is not None:
+            await agent.answer_pending(plan.pending, session)
+        # Otherwise the last reply was saved, or may already have been heard: never
+        # regenerate it. Qalvi waits for the participant, who sees the transcript.
+        return
     wait_for_opening = (lambda: ctx.wait_for_participant(identity=real_participant.identity)) \
         if real_participant else ctx.wait_for_participant
-    if not await opening.start(session, wait_for_opening,
-                               fresh=writer.generation == 1 if writer else None):
-        await ctx.room.local_participant.set_attributes({"qalvi.session.status": "unavailable"})
-        if writer:
-            await writer.interrupt()
+    if not await opening.start(session, wait_for_opening, fresh=None):
+        await ctx.room.local_participant.set_attributes({STATUS_ATTRIBUTE: "unavailable"})
         await session.aclose()
+        ctx.shutdown(reason="Interview session unavailable")
 
 
 if __name__ == "__main__":

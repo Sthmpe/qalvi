@@ -23,6 +23,7 @@ const transcript = load("../src/components/interview/transcription.ts");
 const { upsertTranscript, readTranscript, transcriptId } = transcript;
 const display = load("../src/components/interview/visuals/display.ts");
 const recovery = load("../src/components/interview/recovery.ts");
+const lifecycle = load("../src/components/interview/lifecycle.ts", {}, { setTimeout, clearTimeout, Date });
 
 function reader(streamId, segment, chunks, final = "false", trailer) {
   return {
@@ -82,13 +83,20 @@ function sessionHarness(tokenEndpoint, seedMessages = [], tokenReplies = [], con
   const intervals = new Map();
   const canonical = [...seedMessages];
   const tabStorage = new Map();
+  const snapshot = { status: "in_progress", writerActive: true, recovering: false, replyUnconfirmed: false };
+  const recoverReplies = [];
+  const recoveryRequests = [];
+  const endReplies = [];
+  const endRequests = [];
+  let stateReply;
   let timerId = 0;
   class Room {
     constructor() {
       rooms.push(this);
       this.handlers = new Map();
       this.engine = { isClosed: false, verifyTransport: () => this.transportHealthy !== false };
-      this.remoteParticipants = new Map([["agent", { isAgent: true, attributes: { "lk.agent.state": "listening" } }]]);
+      this.remoteParticipants = new Map([["agent", { identity: "agent", isAgent: true, attributes: {
+        "lk.agent.state": "listening", ...(tokenEndpoint ? { "qalvi.recovery": seedMessages.length ? "resumed" : "fresh" } : {}) } }]]);
       this.localParticipant = {
         identity: "user", microphone: false, sent: [],
         get isMicrophoneEnabled() { return this.microphone; },
@@ -148,9 +156,10 @@ function sessionHarness(tokenEndpoint, seedMessages = [], tokenReplies = [], con
   const { useLiveKitSession: runHook } = load("../src/components/interview/useLiveKitSession.ts", {
     react, "./transcription": transcript, "./visuals/display": display, "./sessionHealth": health,
     "./recovery": recovery,
+    "./lifecycle": lifecycle,
     "livekit-client": livekit,
   }, {
-    performance, crypto, console, setTimeout, clearTimeout, AbortSignal, process: { env: { NODE_ENV: "test" } },
+    performance, crypto, console, setTimeout, clearTimeout, AbortSignal, AbortController, queueMicrotask, process: { env: { NODE_ENV: "test" } },
     Date: class extends Date { static now() { return now; } },
     setInterval: (fn) => { const id = ++timerId; intervals.set(id, fn); return id; },
     clearInterval: (id) => intervals.delete(id),
@@ -158,11 +167,20 @@ function sessionHarness(tokenEndpoint, seedMessages = [], tokenReplies = [], con
       setItem: (key, value) => tabStorage.set(key, value), removeItem: (key) => tabStorage.delete(key) },
     fetch: async (url, options) => {
       if (url.startsWith("/interview/api/state")) {
+        if (stateReply) return stateReply(url, options);
         const after = Number(new URL(url, "http://localhost").searchParams.get("afterSequence"));
         const messages = canonical.filter((m) => m.sequence > after);
-        return { ok: true, json: async () => ({ status: "in_progress", sessionKey: "session-1", messages,
-          nextCursor: messages.at(-1)?.sequence ?? after, hasMore: false, replyUnconfirmed: false,
+        return { ok: true, status: 200, json: async () => ({ ...snapshot, sessionKey: "session-1", messages,
+          nextCursor: messages.at(-1)?.sequence ?? after, hasMore: false,
           controlPending: false, legacyHistory: false }) };
+      }
+      if (url === "/interview/api/recover") {
+        recoveryRequests.push({ body: JSON.parse(options.body), signal: options.signal });
+        return recoverReplies.shift() ?? { status: 200, ok: true, json: async () => ({ state: "active" }) };
+      }
+      if (url === "/interview/api/end") {
+        endRequests.push(JSON.parse(options.body));
+        return endReplies.shift() ?? { status: 200, ok: true, json: async () => ({ status: "completed", endReason: "participant_ended" }) };
       }
       requests.push(JSON.parse(options.body));
       if (tokenReplies.length) return tokenReplies.shift();
@@ -172,7 +190,8 @@ function sessionHarness(tokenEndpoint, seedMessages = [], tokenReplies = [], con
   const initialRecovery = tokenEndpoint ? { status: "pending", sessionKey: "session-1", messages: seedMessages,
     nextCursor: seedMessages.at(-1)?.sequence ?? -1, hasMore: false, replyUnconfirmed: false,
     controlPending: false, legacyHistory: false } : undefined;
-  return { rooms, requests, canonical, tabStorage,
+  return { rooms, requests, canonical, tabStorage, snapshot, recoverReplies, recoveryRequests, endReplies, endRequests,
+    setStateReply: (reply) => { stateReply = reply; },
     tick: (ms = 1000) => { now += ms; for (const fn of intervals.values()) fn(); },
     render: () => { cursor = 0; return runHook(tokenEndpoint, initialRecovery); } };
 }
@@ -705,4 +724,168 @@ test("transcription callbacks from a disconnected room cannot leak into the next
   await harness.render().start("text");
   await staleRoom.transcription(reader("1", "a", ["Stale text"], "true"), { identity: "user" });
   assert.equal(harness.render().messages.length, 0);
+});
+
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test("resumed recovery stays Ready beyond the delayed-turn timer; replacement becomes interviewer", async () => {
+  const h = sessionHarness("/interview/api/token", [{ id: "saved", sequence: 0, speaker: "interviewer", channel: "voice", content: "Earlier question" }]);
+  await h.render().start("text");
+  assert.equal(h.render().turn, null); h.tick(30000);
+  assert.equal(h.render().status, "ready");
+  const room = h.rooms[0];
+  room.remoteParticipants.delete("agent"); room.handlers.get("ParticipantDisconnected")();
+  await settle();
+  assert.equal(h.render().agentReady, false);
+  assert.equal(h.render().phase, "recovering");
+  const replacement = { identity: "replacement", isAgent: true, attributes: { "lk.agent.state": "listening", "qalvi.recovery": "resumed" } };
+  room.remoteParticipants.set("replacement", replacement); room.handlers.get("ParticipantConnected")();
+  assert.equal(h.render().agentReady, true); assert.equal(h.render().turn, null);
+  // A late attribute event from the departed agent cannot change the new one.
+  room.handlers.get("ParticipantAttributesChanged")({ "qalvi.recovery": "fresh" }, { isAgent: true });
+  h.tick(30000); assert.equal(h.render().status, "ready");
+  assert.equal(h.render().messages.length, 1); assert.equal(room.localParticipant.sent.length, 0);
+  h.render().stop();
+});
+
+test("replacement answering waits; reply-uncertain waits for participant and never auto-resends", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text");
+  const room = h.rooms[0], agent = room.remoteParticipants.get("agent");
+  agent.attributes["qalvi.recovery"] = "answering";
+  room.handlers.get("ParticipantAttributesChanged")({ "qalvi.recovery": "answering" }, agent);
+  assert.equal(h.render().turn, "waiting");
+  agent.attributes["qalvi.recovery"] = "reply_uncertain";
+  room.handlers.get("ParticipantAttributesChanged")({ "qalvi.recovery": "reply_uncertain" }, agent);
+  h.tick(30000); assert.equal(h.render().phase, "reply_uncertain");
+  assert.equal(h.render().status, "ready"); assert.equal(h.render().turn, null);
+  assert.equal(room.localParticipant.sent.length, 0);
+  h.render().stop();
+});
+
+test("agent recovery 202 waits for actual participant; teardown aborts obsolete polling", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text");
+  const room = h.rooms[0];
+  h.recoverReplies.push({ status: 202, json: async () => ({ state: "recovering" }) });
+  room.remoteParticipants.clear(); room.handlers.get("ParticipantDisconnected")(); await settle();
+  assert.equal(h.recoveryRequests.length, 1);
+  assert.deepEqual(h.recoveryRequests[0].body, {});
+  assert.equal(h.render().status, "recovering"); assert.equal(h.render().agentReady, false);
+  h.render().setDraft("Keep my unfinished answer");
+  h.render().stop(); assert.equal(h.recoveryRequests[0].signal.aborted, true);
+  assert.equal(h.render().draft, "Keep my unfinished answer");
+});
+
+test("interrupted session offers explicit resume; no automatic typed send", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text");
+  h.render().setDraft("Unsent words"); const room = h.rooms[0];
+  const agent = room.remoteParticipants.get("agent");
+  agent.attributes["qalvi.session.status"] = "interrupted";
+  room.handlers.get("ParticipantAttributesChanged")({ "qalvi.session.status": "interrupted" }, agent);
+  assert.equal(h.render().phase, "interrupted"); assert.equal(h.render().draft, "Unsent words");
+  room.remoteParticipants.clear(); h.snapshot.status = "interrupted";
+  room.remoteParticipants.set("new", { identity: "new", isAgent: true, attributes: { "lk.agent.state": "listening", "qalvi.recovery": "resumed" } });
+  await h.render().reconnect();
+  assert.equal(h.render().status, "ready"); assert.equal(room.localParticipant.sent.length, 0);
+  assert.equal(h.render().draft, "Unsent words"); h.render().stop();
+});
+
+test("terminal agent states clear draft, disable sends and do not revive on reconnect", async () => {
+  for (const status of ["completed", "cancelled", "failed"]) {
+    const h = sessionHarness("/interview/api/token", [{ id: "saved", sequence: 0, speaker: "participant", channel: "text", content: "Keep this evidence" }]);
+    await h.render().start("voice"); h.render().setDraft("Discard on definitive end");
+    h.snapshot.status = status; const room = h.rooms[0], agent = room.remoteParticipants.get("agent");
+    agent.attributes["qalvi.session.status"] = status;
+    room.handlers.get("ParticipantAttributesChanged")({ "qalvi.session.status": status }, agent); await settle();
+    assert.equal(h.render().readOnly, true); assert.equal(h.render().recoveryStatus, status);
+    assert.equal(h.render().draft, ""); assert.equal(h.render().messages.length, 1);
+    assert.equal(await h.render().sendText("Unsafe retry"), false);
+    const count = h.requests.length; await h.render().reconnect(); assert.equal(h.requests.length, count);
+    h.render().stop();
+  }
+});
+
+test("state expiration keeps loaded evidence read-only and cancels typed retry", async () => {
+  const h = sessionHarness("/interview/api/token", [{ id: "saved", sequence: 0, speaker: "participant", channel: "text", content: "Saved" }]);
+  await h.render().start("text"); await settle(); h.render().setDraft("Temporary draft");
+  h.setStateReply(async () => ({ status: 401, ok: false }));
+  h.rooms[0].handlers.get("Reconnected")(); await settle();
+  assert.equal(h.render().phase, "expired"); assert.equal(h.render().draft, "");
+  assert.equal(h.render().messages.length, 1); assert.equal(h.render().readOnly, true);
+  assert.equal(await h.render().sendText("No retry"), false); h.render().stop();
+});
+
+test("participant end is server-confirmed, single flight and safely retryable", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text");
+  h.render().setDraft("Preserve until confirmed");
+  h.endReplies.push({ status: 503, ok: false, json: async () => ({ code: "end_unavailable" }) });
+  assert.equal(await h.render().endInterview(), false);
+  assert.equal(h.render().readOnly, false); assert.equal(h.render().draft, "Preserve until confirmed");
+  let finish;
+  h.endReplies.push(new Promise(resolve => { finish = resolve; }));
+  const ending = h.render().endInterview(); assert.equal(h.render().ending, true);
+  assert.equal(await h.render().endInterview(), false); assert.equal(h.endRequests.length, 2);
+  // Cancellation may win a race with participant end.
+  h.snapshot.status = "cancelled";
+  finish({ status: 200, ok: true, json: async () => ({ status: "cancelled", endReason: "researcher_cancelled" }) });
+  assert.equal(await ending, true); assert.equal(h.render().readOnly, true);
+  assert.equal(h.render().recoveryStatus, "cancelled"); assert.equal(h.render().draft, "");
+  assert.deepEqual(h.endRequests, [{}, {}]); h.render().stop();
+});
+
+test("late state response from a retired room cannot replace a newer transcript", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text"); await settle();
+  let resolve;
+  h.setStateReply(() => new Promise(finish => { resolve = finish; }));
+  h.rooms[0].handlers.get("Reconnected")(); await settle();
+  h.render().stop(); h.setStateReply(undefined); await h.render().start("text");
+  resolve({ status: 200, ok: true, json: async () => ({ status: "cancelled", sessionKey: "session-1",
+    messages: [{ id: "stale", sequence: 0, speaker: "participant", channel: "text", content: "Stale" }] }) });
+  await settle(); assert.equal(h.render().readOnly, false); assert.equal(h.render().messages.length, 0);
+  h.render().stop();
+});
+
+test("canonical assistant evidence clears waiting even if its live caption was lost", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text"); await settle();
+  const room = h.rooms[0];
+  const send = h.render().sendText("An acknowledged answer"); await settle();
+  const eventId = room.localParticipant.sent[0].options.attributes["qalvi.event_id"];
+  await room.evidence({ readAll: async () => JSON.stringify({ eventId, status: "saved" }) }, { identity: "agent" });
+  assert.equal(await send, true); assert.equal(h.render().turn, "waiting");
+  h.canonical.push({ id: "saved-reply", sequence: 1, speaker: "interviewer", channel: "voice", content: "What happened next?" });
+  room.handlers.get("Reconnected")(); await settle();
+  assert.equal(h.render().turn, null); assert.equal(h.render().status, "ready");
+  h.render().stop();
+});
+
+test("newly joined replacement wins overlap; old agent captions cannot create a false reply", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text");
+  const room = h.rooms[0];
+  const replacement = { identity: "new", isAgent: true, attributes: { "lk.agent.state": "listening", "qalvi.recovery": "resumed" } };
+  room.remoteParticipants.set("new", replacement); room.handlers.get("ParticipantConnected")(replacement);
+  await room.transcription(reader("old", "old", ["Old greeting"], "true"), { identity: "agent" });
+  assert.equal(h.render().provisional, null); assert.equal(h.render().turn, null);
+  h.tick(30000); assert.equal(h.render().status, "ready"); h.render().stop();
+});
+
+test("canonical interrupted status requires explicit resume rather than another recovery loop", async () => {
+  const h = sessionHarness("/interview/api/token"); await h.render().start("text"); await settle();
+  h.snapshot.status = "interrupted"; h.snapshot.writerActive = false;
+  h.rooms[0].remoteParticipants.clear(); h.rooms[0].handlers.get("ParticipantDisconnected")(); await settle();
+  assert.equal(h.render().phase, "interrupted"); assert.equal(h.render().agentReady, false);
+  h.tick(10000); await settle(); assert.equal(h.recoveryRequests.length, 0);
+  h.render().stop();
+});
+
+test("refresh does not re-expect a saved greeting or reply from static worker attributes", async () => {
+  const h = sessionHarness("/interview/api/token", [
+    { id: "answer", sequence: 0, speaker: "participant", channel: "text", content: "My saved answer" },
+    { id: "reply", sequence: 1, speaker: "interviewer", channel: "voice", content: "A saved reply" },
+  ]);
+  await h.render().start("text"); const room = h.rooms[0], agent = room.remoteParticipants.get("agent");
+  for (const mode of ["fresh", "answering"]) {
+    agent.attributes["qalvi.recovery"] = mode;
+    room.handlers.get("ParticipantAttributesChanged")({ "qalvi.recovery": mode }, agent);
+    h.tick(30000); assert.equal(h.render().turn, null); assert.equal(h.render().status, "ready");
+  }
+  assert.equal(h.render().messages.length, 2); assert.equal(room.localParticipant.sent.length, 0); h.render().stop();
 });

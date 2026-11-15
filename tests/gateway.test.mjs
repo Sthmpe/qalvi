@@ -281,6 +281,7 @@ test("real LiveKit token ignores browser-chosen scope and refuses a missing resu
     async toJwt() { return "jwt-test"; }
   }
   const { POST } = load("../src/app/interview/api/token/route.ts", {
+    "@/lib/interview/lifecycle": { ensureInterviewWriter: async () => "active" },
     "next/server": { NextResponse: FakeResponse },
     "livekit-server-sdk": { AccessToken: FakeAccessToken, TrackSource: { MICROPHONE: 2 } },
     "@/lib/supabase/secret": { createSupabaseSecretClient: () => { throw Error("Unexpected admin client"); } },
@@ -339,6 +340,7 @@ test("multi-profile token signs only the database-selected project's room and hi
     livekit_room: "qalvi-real-backup-room", transport_generation: 2,
     writer_generation: 0, status: "pending" };
   const { POST } = load("../src/app/interview/api/token/route.ts", {
+    "@/lib/interview/lifecycle": { ensureInterviewWriter: async () => "active" },
     "next/server": { NextResponse: FakeResponse },
     "livekit-server-sdk": { AccessToken: FakeAccessToken, TrackSource: { MICROPHONE: 2 } },
     "@/lib/supabase/secret": { createSupabaseSecretClient: () => ({
@@ -415,5 +417,170 @@ test("multi-profile token signs only the database-selected project's room and hi
   } finally {
     if (previous === undefined) delete process.env.LIVEKIT_PROFILE_IDS;
     else process.env.LIVEKIT_PROFILE_IDS = previous;
+  }
+});
+
+async function withProfiles(work) {
+  const previous = process.env.LIVEKIT_PROFILE_IDS;
+  process.env.LIVEKIT_PROFILE_IDS = "primary,backup_1";
+  try { return await work(); } finally {
+    if (previous === undefined) delete process.env.LIVEKIT_PROFILE_IDS;
+    else process.env.LIVEKIT_PROFILE_IDS = previous;
+  }
+}
+
+test("a started interview's token requires a live writer: lost writers are replaced, exhausted ones refused", async () => {
+  const outcomes = [];
+  let writer = "recovering";
+  const profile = { id: "primary", enabled: true, serverUrl: "wss://primary.test", apiKey: "k", apiSecret: "s",
+    agentName: "qalvi-interview" };
+  const state = { id: "conversation-1", livekit_profile_id: "primary", livekit_room: "qalvi-real-room",
+    transport_generation: 1, writer_generation: 3, status: "interrupted" };
+  const { POST } = load("../src/app/interview/api/token/route.ts", {
+    "@/lib/interview/lifecycle": { ensureInterviewWriter: async (id) => { outcomes.push(id); return writer; } },
+    "next/server": { NextResponse: FakeResponse },
+    "livekit-server-sdk": { AccessToken: class { addGrant() {} async toJwt() { return "jwt"; } },
+      TrackSource: { MICROPHONE: 2 } },
+    "@/lib/supabase/secret": { createSupabaseSecretClient: () => ({}) },
+    "@/lib/interview/gateway": { RESUME_COOKIE: gateway.RESUME_COOKIE, sameOrigin: gateway.sameOrigin,
+      resolveParticipant: async () => ({ id: "conversation-1", participant_id: "p1", livekit_room: "qalvi-real-room",
+        writer_generation: 3 }), readParticipantTransport: async () => state },
+    "@/lib/interview/livekitProfiles": { loadLiveKitProfiles: () => [profile], assignmentTimeoutMs: () => 45_000 },
+    "@/lib/interview/livekitFailures": { LiveKitProviderFailure: class extends Error {} },
+    "@/lib/interview/livekitRouter": { routeLiveKitTransport: async () => ({ kind: "ready", profile, state }) },
+  });
+  const ask = () => POST(request("http://localhost:3000/interview/api/token",
+    { cookie: { [gateway.RESUME_COOKIE]: "valid" } }));
+  await withProfiles(async () => {
+    const recovering = await ask();
+    assert.equal(recovering.status, 200);
+    assert.equal(recovering.body.writer, "recovering");
+    assert.deepEqual(outcomes, ["conversation-1"]);
+    writer = "exhausted";
+    const exhausted = await ask();
+    assert.equal(exhausted.status, 503);
+    assert.equal(exhausted.body.code, "recovery_unavailable");
+    writer = "terminal";
+    assert.equal((await ask()).status, 410);
+  });
+});
+
+test("recover is cookie-scoped, same-origin, never dispatches for an unstarted interview, and maps every state", async () => {
+  let state = "active";
+  let started = 2;
+  const ensured = [];
+  const { POST } = load("../src/app/interview/api/recover/route.ts", {
+    "next/server": { NextResponse: FakeResponse },
+    "@/lib/interview/gateway": { RESUME_COOKIE: gateway.RESUME_COOKIE, sameOrigin: gateway.sameOrigin,
+      resolveParticipant: async (cookie) => cookie === "valid"
+        ? { id: "conversation-1", writer_generation: started } : null },
+    "@/lib/interview/lifecycle": { ensureInterviewWriter: async (id) => { ensured.push(id); return state; } },
+  });
+  const ask = (options = {}) => POST(request("http://localhost:3000/interview/api/recover",
+    { cookie: { [gateway.RESUME_COOKIE]: "valid" }, ...options }));
+  await withProfiles(async () => {
+    assert.equal((await ask({ origin: "https://evil.example" })).status, 403);
+    assert.equal((await POST(request("http://localhost:3000/interview/api/recover"))).status, 401);
+    const expected = { active: 200, recovering: 202, terminal: 410, exhausted: 503, unavailable: 409 };
+    for (const [value, status] of Object.entries(expected)) {
+      state = value;
+      const response = await ask();
+      assert.equal(response.status, status, value);
+      assert.equal(response.body.state, value);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+    started = 0;
+    const pending = await ask();
+    assert.equal(pending.status, 409);
+    assert.equal(pending.body.code, "not_started");
+  });
+  assert.equal(ensured.length, 5);
+});
+
+test("participant end is idempotent and reports the ending the database recorded", async () => {
+  let status = "in_progress";
+  let endReason = null;
+  const ended = [];
+  const { POST } = load("../src/app/interview/api/end/route.ts", {
+    "next/server": { NextResponse: FakeResponse },
+    "@/lib/interview/gateway": { RESUME_COOKIE: gateway.RESUME_COOKIE, sameOrigin: gateway.sameOrigin },
+    "@/lib/interview/recovery": { readParticipantRecovery: async (cookie) => cookie === "valid"
+      ? { status, endReason, sessionKey: "conversation-1" } : null },
+    "@/lib/interview/lifecycle": { endInterview: async (...args) => {
+      ended.push(args);
+      // A researcher cancellation won the race.
+      status = "cancelled"; endReason = "researcher_cancelled";
+      return "cancelled";
+    } },
+    "@/components/interview/recovery": {
+      terminalInterview: (value) => ["completed", "cancelled", "failed"].includes(value) },
+  });
+  const ask = () => POST(request("http://localhost:3000/interview/api/end",
+    { cookie: { [gateway.RESUME_COOKIE]: "valid" } }));
+  const first = await ask();
+  assert.equal(first.status, 200);
+  assert.deepEqual({ ...first.body }, { status: "cancelled", endReason: "researcher_cancelled" });
+  assert.deepEqual(ended.map((call) => [...call]), [["conversation-1", "completed", "participant_ended"]]);
+  const again = await ask();
+  assert.deepEqual({ ...again.body }, { status: "cancelled", endReason: "researcher_cancelled" });
+  assert.equal(ended.length, 1);
+  assert.equal((await POST(request("http://localhost:3000/interview/api/end"))).status, 401);
+});
+
+test("researcher cancellation requires a verified session and an RLS-visible conversation", async () => {
+  let researcher = null;
+  let visible = null;
+  const cancelled = [];
+  const { POST } = load("../src/app/api/research/conversations/[conversationId]/cancel/route.ts", {
+    "next/server": { NextResponse: FakeResponse },
+    "@/lib/auth/session": { getResearcher: async () => researcher },
+    "@/lib/interview/gateway": { sameOrigin: gateway.sameOrigin },
+    "@/lib/interview/lifecycle": { endInterview: async (...args) => { cancelled.push([...args]); return "cancelled"; } },
+    "@/lib/supabase/server": { createSupabaseServerClient: async () => ({ from: () => {
+      const query = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: visible, error: null }) };
+      return query;
+    } }) },
+  });
+  const id = "11111111-1111-4111-8111-111111111111";
+  const ask = (conversationId = id) => POST(
+    request(`http://localhost:3000/api/research/conversations/${conversationId}/cancel`),
+    { params: Promise.resolve({ conversationId }) });
+  assert.equal((await ask()).status, 401);
+  researcher = { id: "researcher-1" };
+  assert.equal((await ask("not-a-uuid")).status, 404);
+  assert.equal((await ask()).status, 404); // another workspace's conversation is invisible
+  assert.deepEqual(cancelled, []);
+  visible = { id };
+  const response = await ask();
+  assert.equal(response.status, 200);
+  assert.deepEqual(cancelled, [[id, "cancelled", "researcher_cancelled"]]);
+});
+
+test("the internal outbox route does not exist without a strong secret and rejects any other bearer", async () => {
+  let drained = 0;
+  const { POST } = load("../src/app/api/internal/lifecycle-outbox/route.ts", {
+    "node:crypto": await import("node:crypto"),
+    "next/server": { NextResponse: FakeResponse },
+    "@/lib/interview/lifecycle": { drainLifecycleOutbox: async () => { drained++; return { completed: 1 }; } },
+  });
+  const ask = (bearer) => {
+    const call = request("http://localhost:3000/api/internal/lifecycle-outbox");
+    if (bearer) call.headers.set("authorization", `Bearer ${bearer}`);
+    return POST(call);
+  };
+  const previous = process.env.QALVI_INTERNAL_TASK_SECRET;
+  try {
+    delete process.env.QALVI_INTERNAL_TASK_SECRET;
+    assert.equal((await ask("anything")).status, 404);
+    process.env.QALVI_INTERNAL_TASK_SECRET = "short";
+    assert.equal((await ask("short")).status, 404);
+    process.env.QALVI_INTERNAL_TASK_SECRET = "x".repeat(40);
+    assert.equal((await ask("y".repeat(40))).status, 404);
+    assert.equal(drained, 0);
+    assert.equal((await ask("x".repeat(40))).status, 200);
+    assert.equal(drained, 1);
+  } finally {
+    if (previous === undefined) delete process.env.QALVI_INTERNAL_TASK_SECRET;
+    else process.env.QALVI_INTERNAL_TASK_SECRET = previous;
   }
 });

@@ -124,7 +124,7 @@ Excluded: LLM-chosen or LLM-authored display actions, study-specific visual conf
 Goal:
 Studies and interviews survive reloads.
 
-Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED. Stage 2B.4B has not started.
+Status: Stage 1 and Stage 2B.1 database migrations deployed to Qalvi; Stage 2A accepted and complete on 2026-09-24. Stage 2B.2 gateway and linked-project HTTP acceptance completed on 2026-09-25. Stage 2B.3 agent-side canonical transcript writes passed linked database and controlled Cloud WebRTC acceptance and were accepted on 2026-09-25. Stage 2B.4A (durable recovery, same-worker reconnect and LiveKit primary-to-backup failover) passed Acceptance A on 2026-10-07 and Acceptance B on 2026-10-08 and is CLOSED (master `1357341`). Stage 2B.4B (writer lease, replacement recovery, completion/cancellation/ejection) is implemented on `stage-2b4b-lifecycle` and passed automated real-LiveKit acceptance on 2026-10-08; its participant lifecycle UI is integrated on `stage-2b4b-integration` and passed real-browser live acceptance on 2026-10-09; it remains OPEN pending the human microphone session, a spoken-turn replacement and a deployed outbox scheduler.
 
 Stage 1 delivered:
 - Supabase project directory with `config.toml` and three fail-closed migrations
@@ -293,8 +293,107 @@ completion is recorded as `interrupted`; a shutdown racing grace expiry can leav
 `in_progress`; cancellation does not eject a connected participant; no
 mid-interview cross-project failover. Stage 2B.4B is not started.
 
-**Stage 2B.4B: DEFERRED (2026-11-10)** by user decision so Milestone 5 can start.
-Its scope and the limitations above are unchanged and remain open.
+**Stage 2B.4B: OPEN (implemented and automated-live-accepted 2026-10-08).**
+Branch `stage-2b4b-lifecycle` from the accepted 2B.4A checkpoint. Migrations
+`20261008000100` (writer lease, recovery reservation, opening marker, terminal
+transition, ejection outbox) and `20261009000100` (heartbeat reports
+server-recorded endings to the current writer) are applied remotely; linked lint
+passed. Primary `6UsqFczaqMPv` and backup `8su99bUN5iL3` run the 2B.4B worker
+(previous versions `UUEPp5yezJfq` and `3QzkQUTG44KT` remain available for rollback).
+
+Delivered:
+- a server-clock writer lease (30 s, 10 s heartbeat); no lease stealing; the
+  takeover reservation fences the lapsed generation at once
+- replacement dispatch into the conversation's own room and project from the
+  token route and `POST /interview/api/recover`; bounded, at most three attempts
+- reconstruction from canonical rows and durable controls without
+  reclassification; each crash boundary handled (uncontrolled turn answered once,
+  controlled turn never regenerated, durable opening marker, saved reply resumes)
+- `completed` on participant end or natural close, `cancelled` by researcher,
+  `failed` on damaged history, `interrupted` otherwise; `ended_at` and reasons
+- ejection through a durable outbox with backoff and through the worker's own
+  heartbeat; `POST /interview/api/end`, researcher cancel, scheduler drain route
+- every LiveKit server call bounded so a slow region fails over instead of hanging
+- every early worker exit shuts the job down; grace expiry checks real presence
+- the UI lifecycle contract for Codex in ARCHITECTURE
+
+Automated live acceptance: one continuous session 18/18 (fresh lease, heartbeat,
+refresh without takeover, boundaries 4, 2 and 3, fencing, researcher cancel and
+ejection, terminal refusal), participant end 3/3, worker-side ejection with an
+undrained outbox 3/3, and post-grace replacement without re-greeting. Validation:
+Node 131/131 (database/RLS 48), Python 127/127, TypeScript, lint, build.
+
+Participant lifecycle UI is implemented on `stage-2b4b-ui`: bounded replacement
+recovery, truthful `qalvi.recovery` expectations, interruption/resume, transport
+switching, uncertain replies, terminal/expired read-only states, and confirmed
+participant ending. Canonical reads and retries preserve evidence/draft identity;
+late requests cannot revive terminal interviews. Researcher cancellation UI is
+not attached to the existing sample-only evidence screen; its API is unchanged.
+
+Remaining before closure: a human microphone/device session; a spoken-turn
+replacement; a scheduler for `/api/internal/lifecycle-outbox` in deployment.
+Mid-interview cross-project failover and an aggregate routing deadline remain out
+of scope.
+
+Integration and final live acceptance (2026-10-09, branch `stage-2b4b-integration`
+from the UI checkpoint `1b8a575`, itself on the backend `f522ea1`). The UI uses the
+backend contract unchanged. One server fix: the public demo had no interviewer,
+because the demo route relied on unnamed automatic dispatch and every deployed
+worker is named; the demo now asks for the named worker of the profile that shares
+its legacy project. Validation: Node 149/149, Python 127/127, TypeScript, lint,
+build, exact-value credential scan of source and browser bundle (13 values, 0 hits).
+
+Real-browser acceptance against the real backend and LiveKit Cloud (headless Chrome,
+typed turns, crash boundaries injected through the service role):
+- demo greets again
+- lifecycle 13/13: greeting without a false delay notice, refresh offers Resume
+  and keeps the same writer, denied microphone notice, replacement after a saved
+  reply (resumed, no re-greeting), replacement with an unconfirmed reply (shown
+  truthfully, never regenerated), explicit typed-draft retry creating exactly one
+  row, End Interview dialog to thanks with room ejection, no polling afterwards
+- cancelled 2/2, expired 2/2, failed 2/2 in 6 of 7 runs
+- backup project: replacement in the backup room (generation 1 to 3), evidence
+  continued without a second greeting, participant end, room ejected
+- internal outbox route: 404 without or with a wrong secret; with the secret it
+  drained a primary and a backup row with each project's credentials; a repeat
+  call drained nothing
+
+Open findings: in one failed-path run the old worker exited normally after being
+fenced, but that browser never requested recovery (not reproduced in six further
+runs). The first backup-routed session after the backup worker scaled to zero was
+assigned a job within 17 s but the browser never joined; a warm repeat passed. The
+inline drain on ending takes the five oldest due rows, so with an undrained backlog
+the ending's own room is ejected by the worker heartbeat instead.
+
+Stage 2B.4B remains OPEN. Still required: a human microphone/device session and a
+spoken-turn replacement (the user must perform them), and a deployed scheduler for
+`/api/internal/lifecycle-outbox`. The Next.js app is not deployed anywhere: the
+Vercel CLI has no credentials and the repository has no project link or other
+hosting configuration, so no scheduler can be configured or verified. Needed: a
+publicly reachable deployment holding `QALVI_INTERNAL_TASK_SECRET`, plus a
+recurring authenticated POST (for example Vercel Cron, or Supabase pg_cron with
+pg_net).
+
+First human microphone session (2026-10-10, conversation
+`c6a9f3e9-24a4-4789-8265-548caa12877b`, primary project, local server on
+`stage-2b4b-integration`). Confirmed by database and worker logs: real voice turns
+were transcribed and saved (`voice:` keys); every control was saved before its reply
+began (`db_ack`, then `control_db_ack`, then `llm_chat_begin`); spoken replies were
+generated and saved; one greeting, contiguous sequence, no duplicate keys; End
+Interview recorded `completed`, `participant_ended` and `ended_at`, the outbox
+ejected the room 2 s later and the room is gone.
+
+Not achieved: no refresh occurred (the worker logged no reconnect grace before the
+end), and the spoken-turn crash injector had already timed out, so no replacement
+ran (writer generation stayed 1). Defect found: Qalvi's own speech was transcribed
+back as participant evidence (sequences 13, 16, 18, 20 and 21 repeat the preceding
+Qalvi line within seconds), and those echoes were classified, including as stop
+requests. The browser publishes the microphone with the default echo cancellation;
+the agent applies no input noise/echo filtering. Also unexplained: about 7.5 minutes
+after the greeting passed with no transcribed speech although the first saved turn
+says "I said I can hear you". The last turn (sequence 21) arrived 1 s before the
+ending and has no control; the ending made the worker stop rather than classify it.
+Human-device and spoken-turn replacement acceptance remain open.
 
 Store:
 - studies

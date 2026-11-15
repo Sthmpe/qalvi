@@ -70,14 +70,17 @@ def control_data(conductor: Conductor, signals: Signals, decision: Decision) -> 
     }
 
 
-def replay_conductor(messages: list[dict], controls: list[dict]) -> Conductor:
-    """Replay one real-default-v1 interview without invoking the classifier.
+def replay_conductor(messages: list[dict], controls: list[dict],
+                     conductor: Conductor | None = None) -> Conductor:
+    """Replay one interview's durable decisions without invoking the classifier.
 
-    Legacy turns or missing/conflicting controls fail closed. Study-plan
-    controls (study-plan-v1) need the saved plan to reconstruct and are refused
-    here; their replacement-worker replay belongs to deferred Stage 2B.4B.
+    `conductor` is the freshly built starting point: the planless default, or
+    one built from the conversation's saved study plan. Every control must carry
+    that conductor's methodology, so a study interview is never replayed as the
+    default and the reverse. Legacy turns, missing or conflicting controls, and
+    a plan that no longer reproduces the saved decisions all fail closed.
     """
-    conductor = Conductor([], InterviewClock())
+    conductor = conductor or Conductor([], InterviewClock())
     by_message = {record["message_id"]: record for record in controls}
     if len(by_message) != len(controls):
         raise RecoveryError("Duplicate control record")
@@ -95,7 +98,7 @@ def replay_conductor(messages: list[dict], controls: list[dict]) -> Conductor:
         if not record:
             raise RecoveryError("Canonical turn has no durable control decision")
         if record["schema_version"] != CONTROL_SCHEMA_VERSION or \
-                record["methodology_version"] != METHODOLOGY_VERSION:
+                record["methodology_version"] != conductor.methodology:
             raise RecoveryError("Unsupported control or methodology version")
         data = record["signals"]
         signals = Signals(
