@@ -841,3 +841,26 @@ Study controls carry methodology `study-plan-v1` so they are never replayed as
 the planless default; the default replay refuses them. Study replay for a
 replacement worker belongs to deferred Stage 2B.4B. Per-study time budgets are
 not included; real interviews have no fixed limit, as before.
+
+## 2026-11-16: integrate 2B.4B, complete visual evidence and results
+
+The user asked for the remaining product to be completed and deployed. The
+2B.4B deferral of 2026-11-10 is therefore replaced by integration: its branch
+was merged into the Milestone 5 branch with both sides' behaviour kept.
+
+Structured visual answers now extend the control-before-reply protocol to the
+`visual` channel through a forward migration, instead of the interim
+answer-in-words rendering, which was removed. The agent, not the browser,
+authors the stored answer text.
+
+AI findings are proposals. They are produced only on a researcher's request,
+one interview per call, with a stored status so a failure is visible and
+retryable. Model output is validated in application code and again in the
+database, and the interface shows the cited messages rather than model quotes.
+
+The workspace navigation moved from a charcoal rail to a warm light surface to
+make light mode the primary experience. The orb, indigo accent and typography
+are unchanged.
+
+None of this has been exercised against the live Supabase, LiveKit or Groq
+services. It must not be recorded as accepted until it has.

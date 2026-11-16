@@ -496,19 +496,48 @@ study columns were added by hand to match the migration), deploying the
 corrected agent source to both LiveKit workers, and one live end-to-end
 acceptance run. Milestone 5 is not accepted until then.
 
-## Milestone 6 — Founder Results
+### Integration and release work (2026-11-15 to 2026-11-16)
+
+Stage 2B.4B (`stage-2b4b-integration`) was merged into the Milestone 5 branch
+rather than left deferred: writer lease and heartbeat, replacement-worker
+recovery, endings, cancellation outbox and the participant lifecycle UI are
+preserved. Replacement recovery now replays a study interview from its saved
+plan. Tapped visual answers are stored as structured evidence in real rooms
+(migration `20261115000100_visual_answers_and_analysis.sql`), replacing the
+interim answer-in-words rendering. The lifecycle outbox has an authenticated GET
+adapter for Vercel Cron.
+
+Validation on the merged tree: production build, TypeScript, lint, 171 Node
+tests (including database/RLS) and 145 Python tests pass.
+
+Still unverified against live providers, because this work was done without
+Supabase, LiveKit or Groq credentials: migrations `20261110000100`,
+`20261110000200` and `20261115000100` are not applied to the linked project,
+`src/types/database.ts` carries hand-written entries for them, the agent is not
+redeployed, and no live interview, analysis call or cron invocation has run.
+The human microphone session and spoken-turn replacement remain pending.
+
+## Milestone 6: Founder Results
+
+Status: implemented 2026-11-16, not yet accepted against live data.
 
 Goal:
 Founder can review completed research.
 
-Initial results:
-- interview list
-- transcripts
-- participant summaries
-- findings
-- objections
-- commitment signals
-- objective coverage
+Delivered:
+- interview list with status, participants, and original transcripts with
+  speaker, elapsed time, channel, search and speaker filter
+- what was shown on screen, in place in the transcript
+- researcher cancellation of a live interview from the transcript view
+- on-request analysis per interview: summary, objective coverage, and proposed
+  findings (including objections and commitment signals) that must cite
+  messages of that conversation; status and errors stored durably; re-runs keep
+  reviewed findings
+- findings view showing supporting and contradicting messages, with
+  accept/dismiss
+
+Not included: cross-interview synthesis, exports, automatic analysis on
+completion.
 
 ## Milestone 7 — Korra Pilot
 

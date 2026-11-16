@@ -16,35 +16,77 @@ must cite the messages that support them and never replace them:
 
 `Study → Participant → Conversation → Raw Evidence → Derived Findings`
 
-## What works today
+## What it does
 
-- **Researcher workspace.** Sign in, then create and edit studies: research
+- **Study setup.** A signed-in researcher creates and edits studies: research
   goal, who to interview, ordered objectives (essential or nice to have),
-  assumptions to test, and an optional on-screen visual per objective using four
+  assumptions to test, and an optional on-screen visual per objective from four
   predefined types: comparison cards, multiple choice, slider, bar chart.
-  Studies are saved in Supabase under row level security, private to the
-  workspace.
 - **Participant links.** An active study issues private, single-use links that
-  expire after seven days. The participant reads the study summary, explicitly
-  consents to transcript storage, and joins. Audio is not stored.
-- **Live interview.** A LiveKit room with a Python agent: Groq Whisper speech to
-  text, a Groq-hosted LLM, Groq Orpheus speech, and the option to type or switch
-  between voice and text at any time. The interview follows the saved study's
-  goal and objectives, never a hard-coded study.
-- **Conversational control.** Each turn is read into structured signals, and a
-  deterministic conductor decides whether to probe, redirect, show a visual,
-  skip, shorten or close. Concerns come first, covered topics are not asked
-  again, and the interviewer stays neutral rather than selling the idea.
-- **Durable evidence and recovery.** Each participant turn is committed to the
-  database, with a control decision, before Qalvi replies. A browser refresh
-  reconnects to the same conversation, and the server can move a session to a
-  backup LiveKit project before the interview starts.
-- **Demo.** `/interview/demo` runs a public, unsaved demo conversation with all
-  four interactive visuals. `/interview/demo/visuals` previews the visuals
-  without a session.
+  expire after seven days. The participant reads the study summary, consents to
+  transcript storage, and joins without an account. Audio is not stored.
+- **Live interview.** Voice or text in one conversation, switchable at any time.
+  The interviewer follows the saved study's goal and objectives. Each turn is
+  read into structured signals and a deterministic conductor decides whether to
+  probe, redirect, show a visual, skip, shorten or close.
+- **Visual evidence.** A visual is recorded before it is shown. A tapped answer
+  is rebuilt by the agent from the visual it displayed and stored atomically as
+  a transcript message plus a structured response.
+- **Recovery and lifecycle.** Every participant turn and its control decision
+  are committed before Qalvi replies. A refresh rejoins the same conversation, a
+  replacement worker replays saved decisions without repeating itself, and
+  completion, cancellation and participant ejection are durable.
+- **Results.** Researchers read original transcripts with search and speaker
+  filters, see what was shown on screen, and can request an analysis: a summary,
+  objective coverage and proposed findings. Every finding links to the exact
+  messages it rests on, including evidence against it, and stays a proposal
+  until a researcher accepts it.
+- **Demo.** `/interview/demo` runs a public, unsaved demo conversation.
 
-Study results (transcript review, findings, objective coverage) are the next
-milestone. See [docs/ROADMAP.md](docs/ROADMAP.md) for status and scope.
+## Architecture
+
+```
+Researcher browser ── Next.js (Vercel) ── Supabase Postgres + Auth (RLS)
+                          │    ▲
+Participant browser ──────┘    │ service-only RPCs
+        │                      │
+        └── LiveKit Cloud ── Python agent (Groq STT, LLM, TTS)
+```
+
+- The **web app** owns researcher pages, the participant gateway (invitation,
+  consent, resume cookie, LiveKit token) and results. It never runs the agent.
+- The **agent** runs on LiveKit Cloud. It resolves its room to one consented
+  conversation, claims a fenced writer lease, reads that conversation's study
+  plan from the database, and is the only writer of interview evidence.
+- The **database** enforces the rules that matter: immutable messages, ordered
+  idempotent appends, answers that must match what was shown, findings that must
+  cite evidence, and tenancy through composite keys and row level security.
+
+### Design decisions
+
+- AI reasons, application code calculates, React renders, the database
+  remembers. The model never authors a visual or executable code.
+- Derived data is kept apart from evidence. An analysis can fail or be re-run
+  without touching a transcript, and the UI shows cited messages themselves
+  rather than model-written quotes.
+- Control decisions are deterministic and versioned, so a replacement worker can
+  replay an interview from saved state instead of guessing.
+- Qalvi is generic. Every study, including the first pilot, is configured
+  through the same study system.
+
+### Security boundaries
+
+- Researchers act only through their own RLS session. Another workspace's
+  studies, interviews and findings do not appear.
+- Participants never sign in and are stored as pseudonymous aliases. Invitation
+  and resume capabilities are opaque tokens stored only as hashes.
+- The browser never chooses a room, identity, study or tenant, and never writes
+  evidence. Privileged operations are service-role RPCs called by server code.
+- Secrets (Supabase secret key, LiveKit secrets, Groq key, scheduler secrets)
+  are server-only and never use a `NEXT_PUBLIC_` name.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for status and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detail.
 
 ## Stack
 
@@ -134,13 +176,30 @@ npm test             # Node tests, including database and RLS tests
 cd agent && python -m unittest discover -p "test_*.py"   # agent tests
 ```
 
+## Deployment
+
+- **Web app:** Vercel, from this repository. Set the variables in
+  `.env.example` for Production and Preview. `vercel.json` registers a daily
+  cron that drains the interview lifecycle outbox through an authenticated GET.
+- **Agent:** LiveKit Cloud, one named worker per LiveKit project (see
+  [agent/README.md](agent/README.md)). It is a long-lived process and does not
+  run on Vercel.
+- **Database:** apply `supabase/migrations` in order with the Supabase CLI.
+
+Live demo: see the repository description for the current Vercel URL.
+
 ## Screenshots
 
-Study overview, with the research goal, objectives and a participant link:
+Interview results: the original transcript, what was shown on screen, and the
+AI interpretation kept separate below it.
+
+![Interview results](docs/screenshots/interview-results.png)
+
+Study overview with objectives and a participant link:
 
 ![Study overview](docs/screenshots/study-overview.png)
 
-Study setup: goal, audience, objectives with optional visuals, assumptions:
+Study setup:
 
 ![Study setup](docs/screenshots/study-setup.png)
 
@@ -154,8 +213,22 @@ The four predefined interactive visuals:
 
 ![Interactive visuals](docs/screenshots/interactive-visuals.png)
 
-The researcher screenshots use illustrative study content. No real participant
-data appears in this repository.
+Researcher screenshots use illustrative content. No real participant data
+appears in this repository.
+
+## Known limitations
+
+- A human microphone session in a normal browser and a spoken-turn worker
+  replacement are still pending acceptance. Automated and synthetic-audio runs
+  do not replace them.
+- An interview follows the study as saved when it starts. Editing objectives
+  during a live interview makes a later worker replacement fail closed.
+- Analysis runs when a researcher asks for it, one interview at a time. There
+  is no cross-interview synthesis yet.
+- No per-study time budget, team management, billing or recruitment.
+- The Vercel cron is daily, which suits every plan. Ejection retries also run
+  whenever an interview ends; a tighter schedule needs a paid plan or another
+  scheduler.
 
 ## Principles
 

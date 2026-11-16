@@ -1027,10 +1027,47 @@ Control records made under a study use methodology `study-plan-v1`; the
 database accepts it alongside `real-default-v1`, and the default replay refuses
 it (study replay belongs to deferred Stage 2B.4B).
 
-Visuals in real rooms: before a study visual is sent, the agent records it with
+Superseded on 2026-11-16 by "Visual answers and results" below. Original note:
+visuals in real rooms: before a study visual is sent, the agent records it with
 the existing `issue_interview_visual` (writer-fenced, immutable), so what the
 participant saw is durable evidence. The room renders it as reference material
 and the participant answers by speaking or typing; that answer is an ordinary
 canonical voice/text message with its control record. Structured tap answers
 (`acknowledge_interview_visual`, `append_interview_visual_response`) need a
 control-protocol change for the `visual` channel and remain later work.
+
+## Visual answers and results (2026-11-16)
+
+Migration `20261115000100_visual_answers_and_analysis.sql`.
+
+Visual answers: the browser sends a render receipt on `qalvi.display.rendered`
+and, on confirm, the usual `[On screen]` chat message with the structured answer
+in a `qalvi.visual` attribute and a stable event id. The agent ignores the
+browser's wording. `visuals.describe_answer` rebuilds the answer from the visual
+the conductor has on screen and refuses anything that does not match it. The
+agent then calls `acknowledge_interview_visual` and
+`append_interview_visual_response` (message plus structured response in one
+transaction, validated again by the database), records the control decision,
+and only then replies. Visual answer messages carry control protocol version 1,
+so `record_interview_turn_control` and replacement replay accept them; replay
+restores the `[On screen]` marker from the `visual` channel.
+
+Replacement recovery under a study: `plan_recovery` receives the conductor built
+from the conversation's saved study plan, and every control must carry that
+conductor's methodology. If the study was edited so the plan no longer
+reproduces the saved decisions, recovery fails closed.
+
+Results: `src/lib/research/results.ts` reads conversations, messages, visual
+displays and findings through the researcher's RLS session.
+`conversation_analyses` stores one run per conversation (processing, completed,
+failed, attempts, error). `begin_conversation_analysis` prevents overlapping
+runs; `complete_conversation_analysis` saves AI findings as `proposed` with
+`origin = ai` and rejects any cited message outside the conversation.
+`src/lib/research/analysisShape.ts` builds the prompt with short message
+references and validates the reply; a finding without a real participant
+citation is dropped. The server calls Groq with `GROQ_API_KEY`; without it the
+analysis reports that it is not configured and transcripts are unaffected.
+
+Scheduler: `GET /api/internal/lifecycle-outbox` accepts only
+`Authorization: Bearer $CRON_SECRET` (Vercel Cron); the POST contract with
+`QALVI_INTERNAL_TASK_SECRET` is unchanged. `vercel.json` registers a daily run.

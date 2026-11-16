@@ -33,7 +33,8 @@ after genuine inactivity. The demo plan and its ten-minute budget apply only to
 study (Milestone 5): `study.py` reads the plan for the claimed conversation
 through the fenced writer, re-validates it, and builds the steps; objectives may
 have no visual, study visuals are recorded with `issue_interview_visual` before
-they are shown and answered in words, and there is no time budget. A real room
+they are shown, tapped answers are rebuilt from the displayed visual and stored
+with `append_interview_visual_response`, and there is no time budget. A real room
 without a usable study plan does not start. Requires
 `livekit-agents >= 1.8`.
 

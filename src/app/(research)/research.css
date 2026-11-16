@@ -2183,3 +2183,55 @@
   min-height: 44px;
   font-size: 12px;
 }
+
+/* Light-first workspace: the navigation rail is a warm surface, not a dark slab.
+   Hierarchy comes from type weight and one quiet accent rather than contrast blocks. */
+.research-sidebar {
+  background: #f3f1ec;
+  color: var(--q-charcoal);
+  border-right: 1px solid #e7e4dd;
+}
+.research-sidebar .workspace-monogram {
+  border-color: #dcd8cf;
+  background: #fff;
+  color: var(--q-charcoal);
+}
+.research-sidebar .workspace-label small,
+.research-sidebar .sidebar-label,
+.research-sidebar .sidebar-footer small {
+  color: #6b6f78;
+}
+.research-sidebar .primary-nav a {
+  color: var(--q-graphite);
+}
+.research-sidebar .primary-nav a:hover {
+  background: #eae7e0;
+  color: var(--q-charcoal);
+}
+.research-sidebar .primary-nav a[aria-current] {
+  background: #fff;
+  color: var(--q-charcoal);
+  box-shadow: inset 2px 0 var(--q-indigo), 0 1px 2px rgb(37 40 45 / 0.06);
+}
+.research-sidebar .nav-mark {
+  color: var(--q-indigo);
+}
+.research-sidebar .sidebar-note {
+  color: #6b6f78;
+}
+.research-sidebar .sidebar-note strong {
+  color: var(--q-charcoal);
+}
+.research-sidebar .note-line {
+  background: var(--q-indigo);
+}
+.research-sidebar .sidebar-footer {
+  border-top-color: #e2dfd7;
+  color: var(--q-graphite);
+}
+.research-sidebar .sample-dot {
+  background: var(--q-indigo);
+}
+.research-sidebar .brand-dot {
+  color: var(--q-indigo);
+}
