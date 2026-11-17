@@ -513,8 +513,13 @@ tests (including database/RLS) and 145 Python tests pass.
 Still unverified against live providers, because this work was done without
 Supabase, LiveKit or Groq credentials: migrations `20261110000100`,
 `20261110000200` and `20261115000100` are not applied to the linked project,
-`src/types/database.ts` carries hand-written entries for them, the agent is not
-redeployed, and no live interview, analysis call or cron invocation has run.
+`src/types/database.ts` carries hand-written entries for them, and no live
+interview, analysis call or cron invocation has run. The merged agent was
+deployed to both LiveKit workers on 2026-11-17 (primary `CA_NysGgMi8dEzY`
+version `giuHHqe3zPcD`, backup `CA_4keN6UcWdPhX`); their secrets were unchanged.
+The live database was checked read-only the same day: it lacks
+`studies.objectives` and `conversation_analyses`, so the migrations above still
+need applying before study creation works.
 The human microphone session and spoken-turn replacement remain pending.
 
 ## Milestone 6: Founder Results
