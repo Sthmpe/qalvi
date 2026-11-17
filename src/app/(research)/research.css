@@ -2235,3 +2235,19 @@
 .research-sidebar .brand-dot {
   color: var(--q-indigo);
 }
+
+.auth-switch {
+  margin-top: 18px;
+  font-size: 14px;
+  color: var(--q-graphite);
+}
+.auth-switch a {
+  color: var(--q-indigo);
+  font-weight: 500;
+}
+.auth-hint,
+.auth-optional {
+  font-size: 12px;
+  font-weight: 400;
+  color: #6b6f78;
+}

@@ -3,6 +3,8 @@
 // authenticate, and the proxy does not run for them at all.
 
 export const SIGN_IN_PATH = "/sign-in";
+export const SIGN_UP_PATH = "/sign-up";
+export const MIN_PASSWORD_LENGTH = 8;
 export const HOME_PATH = "/dashboard";
 
 const RESEARCHER_PREFIXES = ["/dashboard", "/studies"];

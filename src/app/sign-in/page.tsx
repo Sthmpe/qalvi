@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { QalviOrb } from "@/components/ui/primitives";
-import { safeNext } from "@/lib/auth/routes";
+import { SIGN_UP_PATH, safeNext } from "@/lib/auth/routes";
 import { supabaseConfigured } from "@/lib/supabase/config";
 import { SignInForm } from "./SignInForm";
 import "../(research)/research.css";
@@ -27,6 +28,9 @@ export default async function SignInPage({
             Sign in is not available yet. The workspace has not been connected to its database.
           </p>
         )}
+        <p className="auth-switch">
+          New to Qalvi? <Link href={SIGN_UP_PATH}>Create an account</Link>
+        </p>
         <p className="quiet-note">
           Taking part in a conversation? Open the link you were given. You do not need an account.
         </p>

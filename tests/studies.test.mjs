@@ -100,3 +100,17 @@ test("participant links come only from the existing invitation gateway, for acti
   const overview = readFileSync(new URL("../src/app/(research)/studies/[studyId]/page.tsx", import.meta.url), "utf8");
   assert.match(overview, /active=\{study\.status === "active"\}/);
 });
+
+test("sign-up creates confirmed accounts server-side and never exposes the secret key", () => {
+  const actions = readFileSync(new URL("../src/lib/auth/actions.ts", import.meta.url), "utf8");
+  assert.match(actions, /^"use server";/);
+  assert.match(actions, /admin\.auth\.admin\.createUser\(\{\s*email, password, email_confirm: true/);
+  assert.match(actions, /process\.env\.QALVI_SIGNUP_CODE/);
+  assert.doesNotMatch(actions, /^export (const|let|function) /m, "a server-action file exports only async functions");
+  const form = readFileSync(new URL("../src/app/sign-up/SignUpForm.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(form, /secret|SUPABASE_SECRET/i);
+  const proxy = readFileSync(new URL("../src/proxy.ts", import.meta.url), "utf8");
+  assert.match(proxy, /"\/sign-up"/);
+  const routes = readFileSync(new URL("../src/lib/auth/routes.ts", import.meta.url), "utf8");
+  assert.match(routes, /RESEARCHER_PREFIXES = \["\/dashboard", "\/studies"\]/, "sign-up stays a public page");
+});
