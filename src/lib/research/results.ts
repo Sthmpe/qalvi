@@ -54,7 +54,7 @@ export const listInterviews = cache(async (studyId: string): Promise<InterviewSu
   return (data ?? []).map((row, index) => ({
     id: row.id, participant: alias(row.participants?.alias, index), status: status(row.status),
     startedAt: row.started_at, endedAt: row.ended_at, messages: row.messages?.[0]?.count ?? 0,
-    analysis: analysisStatus(row.conversation_analyses?.status),
+    analysis: analysisStatus(row.conversation_analyses?.[0]?.status),
   })).reverse();
 });
 

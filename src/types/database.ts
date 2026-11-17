@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.5"
+    PostgrestVersion: "14.17"
   }
   public: {
     Tables: {
@@ -59,9 +59,9 @@ export type Database = {
         }
         Relationships: [
           {
-            foreignKeyName: "conversation_analyses_conversation_id_study_id_workspace_id_fkey"
+            foreignKeyName: "conversation_analyses_conversation_id_study_id_workspace_i_fkey"
             columns: ["conversation_id", "study_id", "workspace_id"]
-            isOneToOne: true
+            isOneToOne: false
             referencedRelation: "conversations"
             referencedColumns: ["id", "study_id", "workspace_id"]
           },
@@ -871,28 +871,6 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      begin_conversation_analysis: {
-        Args: { p_conversation_id: string }
-        Returns: boolean
-      }
-      complete_conversation_analysis: {
-        Args: {
-          p_conversation_id: string
-          p_findings: Json
-          p_model: string
-          p_objective_coverage: Json
-          p_summary: string
-        }
-        Returns: number
-      }
-      fail_conversation_analysis: {
-        Args: { p_conversation_id: string; p_error: string }
-        Returns: undefined
-      }
-      read_interview_study_plan: {
-        Args: { p_conversation_id: string; p_writer_generation: number }
-        Returns: Json
-      }
       acknowledge_interview_visual: {
         Args: {
           p_action_id: string
@@ -950,6 +928,10 @@ export type Database = {
           message_sequence: number
         }[]
       }
+      begin_conversation_analysis: {
+        Args: { p_conversation_id: string }
+        Returns: boolean
+      }
       claim_conversation_writer: {
         Args: { p_conversation_id: string; p_livekit_room: string }
         Returns: number
@@ -983,6 +965,16 @@ export type Database = {
         }
         Returns: Json
       }
+      complete_conversation_analysis: {
+        Args: {
+          p_conversation_id: string
+          p_findings: Json
+          p_model: string
+          p_objective_coverage: Json
+          p_summary: string
+        }
+        Returns: number
+      }
       confirm_interview_transport: {
         Args: {
           p_conversation_id: string
@@ -1011,6 +1003,10 @@ export type Database = {
           p_writer_generation?: number
         }
         Returns: string
+      }
+      fail_conversation_analysis: {
+        Args: { p_conversation_id: string; p_error: string }
+        Returns: undefined
       }
       fail_interview_transport: {
         Args: {
@@ -1066,6 +1062,10 @@ export type Database = {
       mark_interview_opening: {
         Args: { p_conversation_id: string; p_writer_generation: number }
         Returns: boolean
+      }
+      read_interview_study_plan: {
+        Args: { p_conversation_id: string; p_writer_generation: number }
+        Returns: Json
       }
       read_participant_interview_recovery: {
         Args: {
