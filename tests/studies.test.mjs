@@ -114,3 +114,8 @@ test("sign-up creates confirmed accounts server-side and never exposes the secre
   const routes = readFileSync(new URL("../src/lib/auth/routes.ts", import.meta.url), "utf8");
   assert.match(routes, /RESEARCHER_PREFIXES = \["\/dashboard", "\/studies"\]/, "sign-up stays a public page");
 });
+
+test("the study list never embeds conversations, which reach studies only through participants", () => {
+  const queries = readFileSync(new URL("../src/lib/studies/queries.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(queries, /conversations\s*\(count\)/);
+});

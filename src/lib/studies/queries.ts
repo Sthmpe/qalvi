@@ -14,14 +14,16 @@ export type StudySummary = Study & { conversations: number };
 export const listStudies = cache(async (): Promise<StudySummary[]> => {
   if (!(await getResearcher())) return [];
   const supabase = await createSupabaseServerClient();
-  const { data, error } = await supabase.from("studies")
-    .select(`${COLUMNS}, conversations(count)`)
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error("Studies could not be loaded.");
-  return (data ?? []).map((row) => ({
-    ...studyFromRow(row),
-    conversations: row.conversations?.[0]?.count ?? 0,
-  }));
+  // Conversations reach studies only through participants, so they are counted
+  // with their own query rather than a nested select.
+  const [studies, conversations] = await Promise.all([
+    supabase.from("studies").select(COLUMNS).order("updated_at", { ascending: false }),
+    supabase.from("conversations").select("study_id"),
+  ]);
+  if (studies.error || conversations.error) throw new Error("Studies could not be loaded.");
+  const counts = new Map<string, number>();
+  for (const row of conversations.data ?? []) counts.set(row.study_id, (counts.get(row.study_id) ?? 0) + 1);
+  return (studies.data ?? []).map((row) => ({ ...studyFromRow(row), conversations: counts.get(row.id) ?? 0 }));
 });
 
 /** One study, or null when it does not exist or belongs to another workspace. */
